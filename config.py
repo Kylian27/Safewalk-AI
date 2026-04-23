@@ -25,10 +25,10 @@ CONFIDENCE_THRESHOLD = 0.5
 # Les points doivent être dans l'ordre (horaire ou anti-horaire)
 # ============================================
 CROSSWALK_POLYGON_PERCENT = [
-    (93, 37),   # Point 1
-    (100, 50),   # Point 2
-    (9, 76),   # Point 3
-    (1, 62)   # Point 4
+    (1, 60),   # Point 1
+    (92, 36),   # Point 2
+    (100, 51),   # Point 3
+    (13, 76)   # Point 4
 ]
 
 # ============================================

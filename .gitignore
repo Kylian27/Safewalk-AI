@@ -2,3 +2,7 @@ venv/
 __pycache__/
 *.pyc
 *.pt
+app.spec
+build/
+dist/
+*.log
