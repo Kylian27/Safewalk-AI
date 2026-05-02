@@ -1,4 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenv / Conda
 venv/
+.venv/
+env/
+ENV/
+.conda/
+
+# Byte-compiled / cache
+__pycache__/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Test / coverage
+.pytest_cache/
+.coverage
+
+# Logs / temp
+logs/
+tmp/
+.cache/
+
+# Outputs / artifacts
+output/
+screenshots/
+auto_calibrate/output/
+
+# Models / checkpoints (large files - use LFS or external storage)
+auto_calibrate/models/*.pt
+*.pth
+*.ckpt
+*.h5
+
+# Databases
+*.db
+polygons.db
+
+# Optional: media (untrack large videos)
+# remove leading # to enable
+# videos/*.mp4
+# videos/*.mkvvenv/
 __pycache__/
 *.pyc
 *.pt
