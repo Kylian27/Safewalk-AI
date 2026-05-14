@@ -1,360 +1,368 @@
 """
-Smart Crosswalk Monitor
-Détecte les violations quand un véhicule ne cède pas le passage
-à un piéton sur un passage piéton.
-
-Usage:
-    python main.py                          # Webcam
-    python main.py --source videos/test.mp4 # Vidéo
-    python main.py --source videos/test.mp4 --save  # Sauvegarder
+Smart Crosswalk Monitor - Interface Graphique Unifiée
+Intègre la détection YOLO, le Tracking des véhicules et l'Auto-Calibration.
 """
 
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 import cv2
-import argparse
+import numpy as np
+import PIL.Image, PIL.ImageTk
+import threading
+import json
+import os
 import time
+import sys
+from queue import Queue, Empty
 from ultralytics import YOLO
-from config import *
-from utils import (
-    get_crosswalk_polygon,
-    draw_crosswalk_polygon,
-    is_in_zone,
-    draw_detection,
-    draw_status_panel,
-    draw_violation_alert
-)
 
+# Importation des fichiers locaux (racine)
+import utils
+import config
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Smart Crosswalk Monitor")
-    parser.add_argument("--source", type=str, default="0",
-                        help="Chemin vidéo ou 0 pour webcam")
-    parser.add_argument("--save", action="store_true",
-                        help="Sauvegarder la vidéo de sortie")
-    parser.add_argument("--show", action="store_true", default=True,
-                        help="Afficher la vidéo en temps réel")
-    parser.add_argument("--model", type=str, default=YOLO_MODEL,
-                        help="Modèle YOLO à utiliser")
-    return parser.parse_args()
-
-
-def get_box_center(bbox):
-    """Retourne le centre d'une bounding box."""
-    x1, y1, x2, y2 = bbox
-    return ((x1 + x2) / 2, (y1 + y2) / 2)
-
-
-def distance(p1, p2):
-    """Distance euclidienne entre deux points."""
-    return ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2) ** 0.5
-
-
-class VehicleTracker:
-    """
-    Tracker simple pour suivre les véhicules et éviter 
-    de compter plusieurs fois la même violation.
-    """
-    
-    def __init__(self, max_distance=100, max_frames_missing=30):
-        self.vehicles = {}  # id -> {"center": (x,y), "violated": bool, "missing": int}
-        self.next_id = 0
-        self.max_distance = max_distance  # Distance max pour matcher
-        self.max_frames_missing = max_frames_missing  # Frames avant suppression
-    
-    def update(self, detections, polygon):
-        """
-        Met à jour le tracker avec les nouvelles détections.
+class VideoProcessorThread(threading.Thread):
+    def __init__(self, source, model, polygon_percent, frame_queue, stop_event, canvas_width, canvas_height):
+        super().__init__()
+        self.source = source
+        self.model = model
+        self.polygon_percent = polygon_percent
+        self.frame_queue = frame_queue
+        self.stop_event = stop_event
+        self.canvas_width = canvas_width
+        self.canvas_height = canvas_height
+        self.daemon = True
         
-        Args:
-            detections: liste de bboxes [(x1,y1,x2,y2), ...]
-            polygon: zone du passage piéton
+        # Initialisation du tracker pour les véhicules
+        self.tracker = utils.VehicleTracker(max_distance=100, max_frames_missing=30)
+        self.violation_count = 0
+
+    def run(self):
+        cap = cv2.VideoCapture(self.source)
+        frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Récupération du polygone en pixels
+        polygon = utils.get_crosswalk_polygon(frame_width, frame_height, self.polygon_percent)
+        
+        while not self.stop_event.is_set():
+            ret, frame = cap.read()
+            if not ret: break
             
-        Returns:
-            new_violations: nombre de NOUVELLES violations ce frame
-            vehicles_in_zone: liste des véhicules actuellement en zone
-        """
-        new_violations = 0
-        vehicles_in_zone = []
-        matched_ids = set()
-        
-        for bbox in detections:
-            center = get_box_center(bbox)
-            in_zone = is_in_zone(bbox, polygon)
+            # --- Traitement YOLO ---
+            results = self.model(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)
             
-            # Chercher le véhicule le plus proche
-            best_id = None
-            best_dist = float('inf')
+            persons_in_zone = 0
+            person_bboxes = []
+            vehicle_bboxes = []
             
-            for vid, vdata in self.vehicles.items():
-                if vid in matched_ids:
-                    continue
-                d = distance(center, vdata["center"])
-                if d < best_dist and d < self.max_distance:
-                    best_dist = d
-                    best_id = vid
-            
-            if best_id is not None:
-                # Véhicule existant trouvé
-                matched_ids.add(best_id)
-                self.vehicles[best_id]["center"] = center
-                self.vehicles[best_id]["missing"] = 0
-                self.vehicles[best_id]["bbox"] = bbox
-                
-                # Vérifier si nouvelle violation
-                if in_zone and not self.vehicles[best_id]["violated"]:
-                    self.vehicles[best_id]["violated"] = True
-                    self.vehicles[best_id]["in_zone"] = True
-                    new_violations += 1
-                elif in_zone:
-                    self.vehicles[best_id]["in_zone"] = True
-                else:
-                    self.vehicles[best_id]["in_zone"] = False
-                    
-            else:
-                # Nouveau véhicule
-                self.vehicles[self.next_id] = {
-                    "center": center,
-                    "bbox": bbox,
-                    "violated": False,
-                    "in_zone": in_zone,
-                    "missing": 0
-                }
-                
-                # Si déjà dans la zone, c'est une violation
-                if in_zone:
-                    self.vehicles[self.next_id]["violated"] = True
-                    new_violations += 1
-                
-                matched_ids.add(self.next_id)
-                self.next_id += 1
-        
-        # Incrémenter le compteur missing pour les véhicules non matchés
-        ids_to_remove = []
-        for vid in self.vehicles:
-            if vid not in matched_ids:
-                self.vehicles[vid]["missing"] += 1
-                self.vehicles[vid]["in_zone"] = False
-                if self.vehicles[vid]["missing"] > self.max_frames_missing:
-                    ids_to_remove.append(vid)
-        
-        # Supprimer les véhicules disparus depuis trop longtemps
-        for vid in ids_to_remove:
-            del self.vehicles[vid]
-        
-        # Lister les véhicules actuellement dans la zone
-        for vid, vdata in self.vehicles.items():
-            if vdata.get("in_zone", False):
-                vehicles_in_zone.append(vdata["bbox"])
-        
-        return new_violations, vehicles_in_zone
-    
-    def get_active_violations(self):
-        """Retourne le nombre de véhicules actuellement en zone qui ont violé."""
-        count = 0
-        for vdata in self.vehicles.values():
-            if vdata.get("in_zone", False) and vdata.get("violated", False):
-                count += 1
-        return count
-
-
-def main():
-    args = parse_args()
-    
-    # ================================
-    # 1. Charger le modèle YOLO
-    # ================================
-    print("[INFO] Chargement du modèle YOLO...")
-    model = YOLO(args.model)
-    print(f"[INFO] Modèle {args.model} chargé avec succès!")
-    
-    # ================================
-    # 2. Ouvrir la source vidéo
-    # ================================
-    source = int(args.source) if args.source.isdigit() else args.source
-    cap = cv2.VideoCapture(source)
-    
-    if not cap.isOpened():
-        print(f"[ERREUR] Impossible d'ouvrir la source: {args.source}")
-        return
-    
-    # Propriétés de la vidéo
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-    
-    print(f"[INFO] Vidéo: {frame_width}x{frame_height} @ {fps}fps")
-    
-    # ================================
-    # 3. Calculer la zone passage piéton
-    # ================================
-    crosswalk_polygon = get_crosswalk_polygon(frame_width, frame_height)
-    print(f"[INFO] Zone passage piéton: {crosswalk_polygon}")
-    
-    # ================================
-    # 4. Préparer la sauvegarde vidéo
-    # ================================
-    writer = None
-    if args.save:
-        output_path = f"output/output_{int(time.time())}.mp4"
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(output_path, fourcc, fps, 
-                                  (frame_width, frame_height))
-        print(f"[INFO] Sauvegarde vers: {output_path}")
-    
-    # ================================
-    # 5. Variables de suivi
-    # ================================
-    violation_count = 0
-    frame_count = 0
-    vehicle_tracker = VehicleTracker(
-        max_distance=100,      # Distance max pour associer un véhicule
-        max_frames_missing=30  # Frames avant d'oublier un véhicule
-    )
-    
-    # ================================
-    # 6. Boucle principale
-    # ================================
-    print("[INFO] Démarrage de la détection... (Appuie 'q' pour quitter)")
-    print("=" * 60)
-    
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[INFO] Fin de la vidéo.")
-            break
-        
-        frame_count += 1
-        
-        # ----- DÉTECTION YOLO -----
-        results = model(frame, conf=CONFIDENCE_THRESHOLD, verbose=False)
-        
-        # ----- ANALYSE DES DÉTECTIONS -----
-        persons_in_zone = 0
-        person_bboxes = []
-        vehicle_bboxes = []
-        
-        for result in results:
-            boxes = result.boxes
-            if boxes is None:
-                continue
-                
-            for box in boxes:
+            # 1. Trier les détections
+            for box in results[0].boxes:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
                 bbox = box.xyxy[0].tolist()
                 
-                # --- PIÉTONS ---
-                if cls_id == PERSON_CLASS_ID:
-                    in_zone = is_in_zone(bbox, crosswalk_polygon)
-                    
-                    if in_zone:
+                if cls_id == config.PERSON_CLASS_ID:
+                    if utils.is_in_zone(bbox, polygon):
                         persons_in_zone += 1
-                        label = f"Pedestrian {conf:.0%} [IN ZONE]"
-                        color = COLOR_YELLOW
+                        person_bboxes.append((bbox, f"Ped {conf:.0%} [IN]", config.COLOR_YELLOW))
                     else:
-                        label = f"Pedestrian {conf:.0%}"
-                        color = COLOR_GREEN
-                    
-                    person_bboxes.append((bbox, label, color))
-                
-                # --- VÉHICULES ---
-                elif cls_id in VEHICLE_CLASSES:
-                    class_name = model.names[cls_id]
+                        person_bboxes.append((bbox, f"Ped {conf:.0%}", config.COLOR_GREEN))
+                elif cls_id in config.VEHICLE_CLASSES:
+                    class_name = self.model.names[cls_id]
                     vehicle_bboxes.append((bbox, class_name, conf))
-        
-        # ----- TRACKING DES VÉHICULES -----
-        # On ne track que s'il y a des piétons dans la zone
-        vehicle_detections = [v[0] for v in vehicle_bboxes]
-        
-        if persons_in_zone > 0:
-            new_violations, vehicles_in_zone_bboxes = vehicle_tracker.update(
-                vehicle_detections, crosswalk_polygon
-            )
-            violation_count += new_violations
-            
-            if new_violations > 0:
-                print(f"[⚠ VIOLATION #{violation_count}] Frame {frame_count}: "
-                      f"Véhicule dans la zone avec {persons_in_zone} piéton(s)!")
-        else:
-            # Pas de piéton = on update quand même le tracker mais sans violation
-            _, vehicles_in_zone_bboxes = vehicle_tracker.update(
-                vehicle_detections, crosswalk_polygon
-            )
-            # Reset le statut "violated" si le piéton est parti
-            for vid in vehicle_tracker.vehicles:
-                if vehicle_tracker.vehicles[vid].get("in_zone", False):
-                    # Le véhicule est dans la zone mais pas de piéton = pas de violation
-                    pass
-        
-        vehicles_in_zone = len(vehicles_in_zone_bboxes)
-        current_violation = (persons_in_zone > 0 and vehicles_in_zone > 0)
-        
-        # ----- DESSIN DES DÉTECTIONS -----
-        # Dessiner les piétons
-        for bbox, label, color in person_bboxes:
-            draw_detection(frame, bbox, label, color)
-        
-        # Dessiner les véhicules
-        for bbox, class_name, conf in vehicle_bboxes:
-            in_zone = bbox in vehicles_in_zone_bboxes or is_in_zone(bbox, crosswalk_polygon)
-            
-            if in_zone and persons_in_zone > 0:
-                label = f"{class_name} {conf:.0%} [VIOLATION]"
-                color = COLOR_RED
-                is_violation = True
-            elif in_zone:
-                label = f"{class_name} {conf:.0%} [IN ZONE]"
-                color = COLOR_ORANGE
-                is_violation = False
-            else:
-                label = f"{class_name} {conf:.0%}"
-                color = COLOR_BLUE
-                is_violation = False
-            
-            draw_detection(frame, bbox, label, color, is_violation=is_violation)
-        
-        # ----- DESSIN SUR L'IMAGE -----
-        frame = draw_crosswalk_polygon(frame, crosswalk_polygon, 
-                                       violation=current_violation)
-        
-        frame = draw_status_panel(frame, persons_in_zone, vehicles_in_zone,
-                                   current_violation, violation_count)
-        
-        if current_violation:
-            frame = draw_violation_alert(frame)
-        
-        # ----- AFFICHAGE -----
-        if args.show:
-            cv2.imshow("Smart Crosswalk Monitor", frame)
-            
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("[INFO] Arrêt demandé par l'utilisateur.")
-                break
-            elif key == ord('s'):
-                screenshot_path = f"screenshots/screenshot_{frame_count}.jpg"
-                cv2.imwrite(screenshot_path, frame)
-                print(f"[INFO] Screenshot sauvegardé: {screenshot_path}")
-            elif key == ord('p'):
-                print("[INFO] Pause - Appuie sur n'importe quelle touche...")
-                cv2.waitKey(0)
-        
-        # ----- SAUVEGARDE -----
-        if writer is not None:
-            writer.write(frame)
-    
-    # ================================
-    # 7. Nettoyage
-    # ================================
-    print("=" * 60)
-    print(f"[RÉSULTATS] Frames traitées: {frame_count}")
-    print(f"[RÉSULTATS] Violations détectées: {violation_count}")
-    
-    cap.release()
-    if writer is not None:
-        writer.release()
-        print(f"[INFO] Vidéo sauvegardée.")
-    cv2.destroyAllWindows()
 
+            # 2. Tracking des véhicules et détection des violations
+            vehicle_detections = [v[0] for v in vehicle_bboxes]
+            if persons_in_zone > 0:
+                new_violations, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
+                self.violation_count += new_violations
+            else:
+                _, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
+
+            current_violation = (persons_in_zone > 0 and len(vehicles_in_zone_bboxes) > 0)
+            
+            # 3. Dessin des éléments sur la frame
+            processed_frame = frame.copy()
+            
+            for bbox, label, color in person_bboxes:
+                processed_frame = utils.draw_detection(processed_frame, bbox, label, color)
+                
+            for bbox, class_name, conf in vehicle_bboxes:
+                in_zone = bbox in vehicles_in_zone_bboxes or utils.is_in_zone(bbox, polygon)
+                if in_zone and persons_in_zone > 0:
+                    label = f"{class_name} {conf:.0%} [VIOLATION]"
+                    color = config.COLOR_RED
+                    is_viol = True
+                elif in_zone:
+                    label = f"{class_name} {conf:.0%} [IN ZONE]"
+                    color = config.COLOR_ORANGE
+                    is_viol = False
+                else:
+                    label = f"{class_name} {conf:.0%}"
+                    color = config.COLOR_BLUE
+                    is_viol = False
+                processed_frame = utils.draw_detection(processed_frame, bbox, label, color, is_violation=is_viol)
+            
+            # Dessiner le polygone rempli et le panneau
+            processed_frame = utils.draw_crosswalk_polygon(processed_frame, polygon, current_violation)
+            processed_frame = utils.draw_status_panel(processed_frame, persons_in_zone, len(vehicles_in_zone_bboxes), current_violation, self.violation_count)
+            
+            if current_violation:
+                processed_frame = utils.draw_violation_alert(processed_frame)
+            
+            # --- Préparation pour Tkinter (Thread-Safe et Optimisé) ---
+            # Redimensionnement ultra-rapide avec OpenCV (évite le lag de 1 FPS)
+            processed_frame = cv2.resize(processed_frame, (self.canvas_width, self.canvas_height), interpolation=cv2.INTER_LINEAR)
+            img = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+            img = PIL.Image.fromarray(img)
+            
+            # Si la queue est pleine (l'interface galère à afficher), on jette la frame pour ne pas accumuler de retard
+            if not self.frame_queue.full():
+                self.frame_queue.put(img)
+
+        cap.release()
+
+class SmartCrosswalkApp:
+    def __init__(self, window):
+        self.window = window
+        self.window.title("SafeWalk AI - Smart Crosswalk Monitor")
+        self.window.geometry("1200x800")
+        self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        self.stop_event = threading.Event()
+        # Limitation de la queue à 3 frames pour éviter l'accumulation de mémoire et les lags
+        self.frame_queue = Queue(maxsize=3)
+        self.model = None
+        self.settings_file = "settings.json"
+        self.source = None
+        
+        self.points = []
+        self.mode = "IDLE"
+        self.current_frame_cv2 = None
+        
+        # On ne charge plus de polygone au démarrage pour obliger à calibrer sur la nouvelle vidéo
+        self.polygon_percent = [] 
+
+        self.setup_ui()
+        self.process_queue()
+
+    def save_settings(self):
+        with open(self.settings_file, "w") as f:
+            json.dump({"polygon": self.polygon_percent}, f)
+
+    def setup_ui(self):
+        self.controls = ttk.Frame(self.window, padding="10")
+        self.controls.pack(side=tk.LEFT, fill=tk.Y)
+
+        ttk.Label(self.controls, text="MENU", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        # Boutons sans émojis pour éviter les bugs d'affichage
+        self.btn_open = ttk.Button(self.controls, text="Open video", command=self.open_source)
+        self.btn_open.pack(fill=tk.X, pady=5)
+
+        self.btn_calib = ttk.Button(self.controls, text="Manual Calibration", command=self.start_calibration)
+        self.btn_calib.pack(fill=tk.X, pady=5)
+
+        self.btn_auto_calib = ttk.Button(self.controls, text="Auto Calibration", command=self.start_auto_calibration)
+        self.btn_auto_calib.pack(fill=tk.X, pady=5)
+
+        self.btn_run = ttk.Button(self.controls, text="Start Detection", command=self.start_detection)
+        self.btn_run.pack(fill=tk.X, pady=5)
+
+        self.btn_stop = ttk.Button(self.controls, text="Stop", command=self.stop_all)
+        self.btn_stop.pack(fill=tk.X, pady=5)
+
+        self.status_label = ttk.Label(self.controls, text="Status: Ready", foreground="blue")
+        self.status_label.pack(side=tk.BOTTOM, pady=20)
+
+        self.CANVAS_W, self.CANVAS_H = 960, 540
+        self.canvas = tk.Canvas(self.window, bg="black", width=self.CANVAS_W, height=self.CANVAS_H)
+        self.canvas.pack(side=tk.RIGHT, expand=True)
+        self.canvas.bind("<Button-1>", self.on_canvas_click)
+        self.canvas_image = self.canvas.create_image(0, 0, anchor=tk.NW)
+
+    def display_first_frame(self, frame):
+        self.current_frame_cv2 = frame
+        
+        # Redimensionnement rapide via OpenCV
+        frame_resized = cv2.resize(frame, (self.CANVAS_W, self.CANVAS_H), interpolation=cv2.INTER_LINEAR)
+        img = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        
+        # Dessiner le polygone s'il y en a un
+        if self.polygon_percent and len(self.polygon_percent) >= 3:
+            poly_px = utils.get_crosswalk_polygon(self.CANVAS_W, self.CANVAS_H, self.polygon_percent)
+            cv2.polylines(img, [np.array(poly_px, np.int32)], True, (0, 255, 0), 2)
+            
+        img = PIL.Image.fromarray(img)
+        self.photo = PIL.ImageTk.PhotoImage(image=img)
+        self.canvas.itemconfig(self.canvas_image, image=self.photo)
+
+    def open_source(self):
+        path = filedialog.askopenfilename()
+        if path:
+            self.source = path
+            self.polygon_percent = [] # Reset du polygone quand on change de vidéo
+            self.status_label.config(text=f"Video loaded (Please calibrate)")
+            cap = cv2.VideoCapture(self.source)
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                self.display_first_frame(frame)
+
+    def get_auto_polygon(self, frame):
+        """Isole dynamiquement l'import d'auto_calibrate pour éviter les conflits de 'config'."""
+        auto_calib_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'auto_calibrate'))
+        
+        root_config = sys.modules.get('config')
+        root_utils = sys.modules.get('utils')
+        if 'config' in sys.modules: del sys.modules['config']
+        if 'utils' in sys.modules: del sys.modules['utils']
+        
+        sys.path.insert(0, auto_calib_dir)
+        try:
+            from poly_utils import load_model, predict_trimap, extract_polygon
+            import config as ac_config
+            model = load_model(ac_config.BASE_CKPT)
+            trimap = predict_trimap(model, frame)
+            poly = extract_polygon(trimap)
+            return poly
+        finally:
+            sys.path.pop(0)
+            if root_config: sys.modules['config'] = root_config
+            if root_utils: sys.modules['utils'] = root_utils
+
+    def start_auto_calibration(self):
+        if not self.source:
+            messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
+            return
+
+        self.status_label.config(text="Status: IA Auto-Calib en cours...")
+        self.window.update()
+
+        cap = cv2.VideoCapture(self.source)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret:
+            messagebox.showerror("Erreur", "Impossible de lire la vidéo.")
+            return
+
+        try:
+            poly = self.get_auto_polygon(frame)
+            if poly is not None:
+                h, w = frame.shape[:2]
+                self.polygon_percent = [(int(pt[0]/w*100), int(pt[1]/h*100)) for pt in poly]
+                self.save_settings()
+                self.status_label.config(text="Status: Auto-Calibré")
+                messagebox.showinfo("Succès", "Passage piéton calibré automatiquement !")
+                self.display_first_frame(frame)
+            else:
+                self.status_label.config(text="Status: Échec Auto-Calib")
+                messagebox.showerror("Erreur", "Aucun passage piéton détecté par l'IA.")
+        except Exception as e:
+            self.status_label.config(text="Status: Erreur IA")
+            messagebox.showerror("Erreur", f"Erreur lors de l'auto-calibration:\n{str(e)}")
+
+    def start_calibration(self):
+        if not self.source:
+            messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
+            return
+        self.mode = "CALIBRATING"
+        self.points = []
+        self.canvas.delete("calibration")
+        self.status_label.config(text="Mode: Calibration (Cliquez 4 points)")
+
+    def on_canvas_click(self, event):
+        if self.mode != "CALIBRATING": return
+        
+        x, y = event.x, event.y
+        self.points.append((x, y))
+        self.canvas.create_oval(x-5, y-5, x+5, y+5, fill="red", outline="white", tags="calibration")
+
+        if len(self.points) > 1:
+            self.canvas.delete("temp_poly")
+            self.canvas.create_polygon(self.points, fill="cyan", stipple="gray25", outline="cyan", tags=("calibration", "temp_poly"))
+
+        if len(self.points) == 4:
+            self.polygon_percent = []
+            for px, py in self.points:
+                pc_x = int((px / self.CANVAS_W) * 100)
+                pc_y = int((py / self.CANVAS_H) * 100)
+                self.polygon_percent.append((pc_x, pc_y))
+            
+            self.save_settings()
+            self.mode = "IDLE"
+            messagebox.showinfo("Calibration", "Zone sauvegardée !")
+            self.status_label.config(text="Statut: Calibré manuellement")
+            if self.current_frame_cv2 is not None:
+                self.display_first_frame(self.current_frame_cv2)
+
+    def start_detection(self):
+        if not self.source:
+            messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
+            return
+            
+        # SÉCURITÉ : Empêche la détection si aucun polygone n'est calibré
+        if not self.polygon_percent or len(self.polygon_percent) < 3:
+            messagebox.showwarning("Calibration requise", "Veuillez d'abord calibrer la zone (Manuel ou Auto) avant de lancer la détection.")
+            return
+            
+        if self.mode == "RUNNING": return
+        
+        self.status_label.config(text="Chargement IA...")
+        self.window.update()
+        
+        if not self.model:
+            self.model = YOLO(config.YOLO_MODEL)
+            
+        self.stop_all()
+        
+        self.processor_thread = VideoProcessorThread(
+            self.source, 
+            self.model, 
+            self.polygon_percent, 
+            self.frame_queue, 
+            self.stop_event, 
+            self.CANVAS_W, 
+            self.CANVAS_H
+        )
+        self.processor_thread.start()
+        self.mode = "RUNNING"
+        self.status_label.config(text="Statut: Détection en cours")
+
+    def process_queue(self):
+        if self.mode == "RUNNING":
+            try:
+                img = self.frame_queue.get_nowait()
+                self.photo = PIL.ImageTk.PhotoImage(image=img)
+                
+                # --- REMPLACE LA LIGNE create_image PAR CELLE-CI ---
+                self.canvas.itemconfig(self.canvas_image, image=self.photo)
+                
+            except Empty:
+                pass
+        self.window.after(10, self.process_queue)
+
+    def stop_all(self):
+        self.stop_event.set()
+        while not self.frame_queue.empty():
+            try:
+                self.frame_queue.get_nowait()
+            except Empty:
+                break
+        
+        if hasattr(self, 'processor_thread') and self.processor_thread.is_alive():
+            self.processor_thread.join(timeout=1.0)
+            
+        self.stop_event.clear()
+        self.mode = "IDLE"
+        self.status_label.config(text="Statut: Arrêté")
+    
+    def on_closing(self):
+        self.stop_all()
+        self.window.destroy()
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = SmartCrosswalkApp(root)
+    root.mainloop()

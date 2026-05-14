@@ -56,3 +56,5 @@ polygons.db
 __pycache__/
 *.pyc
 *.pt
+
+settings.json

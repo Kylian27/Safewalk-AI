@@ -1,5 +1,5 @@
 """
-Configuration du Smart Crosswalk Monitor
+Configuration du Smart Crosswalk Monitor (Root)
 """
 
 # ============================================
@@ -20,16 +20,9 @@ YOLO_MODEL = "yolov8n.pt"  # nano = rapide, suffisant
 CONFIDENCE_THRESHOLD = 0.5
 
 # ============================================
-# ZONE DU PASSAGE PIÉTON - 4 POINTS EN POURCENTAGES
-# Format: [(x1%, y1%), (x2%, y2%), (x3%, y3%), (x4%, y4%)]
-# Les points doivent être dans l'ordre (horaire ou anti-horaire)
+# ZONE DU PASSAGE PIÉTON - POINTS EN POURCENTAGES
 # ============================================
-CROSSWALK_POLYGON_PERCENT = [
-    (93, 37),   # Point 1
-    (100, 50),   # Point 2
-    (9, 76),   # Point 3
-    (1, 62)   # Point 4
-]
+CROSSWALK_POLYGON_PERCENT = []
 
 # ============================================
 # COULEURS (BGR pour OpenCV)

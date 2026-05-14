@@ -1,3 +1,7 @@
 ultralytics
 opencv-python
 numpy
+segmentation-models-pytorch
+torch
+torchvision
+shapely
