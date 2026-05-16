@@ -113,8 +113,15 @@ def get_crosswalk_polygon(frame_width, frame_height, polygon_percent=None):
     return polygon
 
 def is_in_zone(bbox, polygon):
-    center = get_box_center(bbox)
-    return point_in_polygon(center[0], center[1], polygon)
+    x1, y1, x2, y2 = [int(c) for c in bbox]
+    # bbox 꼭짓점 4개 + 하단 중심점 중 하나라도 폴리곤 안이면 True
+    check_points = [
+        ((x1 + x2) // 2, y2),   # 하단 중심
+        (x1, y2),                # 하단 왼쪽
+        (x2, y2),                # 하단 오른쪽
+        ((x1 + x2) // 2, (y1 + y2) // 2),  # 중심
+    ]
+    return any(point_in_polygon(px, py, polygon) for px, py in check_points)
 
 def draw_crosswalk_polygon(frame, polygon, violation=False):
     overlay = frame.copy()

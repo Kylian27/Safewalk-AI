@@ -30,12 +30,19 @@ def preprocess(image: np.ndarray) -> torch.Tensor:
     return tensor.to(config.DEVICE)
 
 
-def predict_trimap(model, image: np.ndarray) -> np.ndarray:
+def predict_trimap(model, image):
     orig_h, orig_w = image.shape[:2]
     with torch.no_grad():
-        tensor = preprocess(image)
-        logits = model(tensor)
-        pred = torch.argmax(logits, dim=1)
+        # 원본
+        logits = model(preprocess(image))
+        # 좌우반전
+        flipped = cv2.flip(image, 1)
+        logits_flip = model(preprocess(flipped))
+        # 반전 결과를 다시 뒤집어서 원본 좌표계로
+        logits_flip = torch.flip(logits_flip, dims=[3])
+        # 평균
+        logits_avg = (logits + logits_flip) / 2
+        pred = torch.argmax(logits_avg, dim=1)
         trimap = pred[0].cpu().numpy().astype(np.uint8)
     trimap = cv2.resize(trimap, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
     return trimap
@@ -78,13 +85,13 @@ def extract_obb(trimap: np.ndarray) -> dict | None:
     }
 
 
-def extract_polygon(trimap: np.ndarray, kernel_size: int = 15,
-                    min_area: int = 500, approx_epsilon: float = 5.0) -> np.ndarray | None:
+def extract_polygon(trimap: np.ndarray, kernel_size: int = 25,
+                    min_area: int = 500, approx_epsilon: float = 3.0) -> np.ndarray | None:
     """Trimap(0/1/2)에서 polygon을 추출하여 (N,2) ndarray로 반환.
     내부(1)와 경계(2)를 합쳐 마스크를 만들고 morphology close로 줄무늬 틈을 메운 뒤
     가장 큰 컨투어의 convex hull을 approxPolyDP로 단순화한다.
     """
-    mask = np.where((trimap == 1) | (trimap == 2), 255, 0).astype(np.uint8)
+    mask = np.where(trimap == 1, 255, 0).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
