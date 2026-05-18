@@ -19,7 +19,7 @@ def distance(p1, p2):
 class VehicleTracker:
     """Tracker simple pour éviter de compter plusieurs fois la même violation."""
     def __init__(self, max_distance=100, max_frames_missing=30):
-        self.vehicles = {}  # id -> {"center": (x,y), "violated": bool, "missing": int, "bbox": tuple}
+        self.vehicles = {}
         self.next_id = 0
         self.max_distance = max_distance
         self.max_frames_missing = max_frames_missing

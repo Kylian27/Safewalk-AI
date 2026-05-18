@@ -1,8 +1,3 @@
-"""
-Smart Crosswalk Monitor - Interface Graphique Unifiée
-Intègre la détection YOLO, le Tracking des véhicules et l'Auto-Calibration.
-"""
-
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import cv2
@@ -15,8 +10,6 @@ import time
 import sys
 from queue import Queue, Empty
 from ultralytics import YOLO
-
-# Importation des fichiers locaux (racine)
 import utils
 import config
 
@@ -32,7 +25,7 @@ class VideoProcessorThread(threading.Thread):
         self.canvas_height = canvas_height
         self.daemon = True
         
-        # Initialisation du tracker pour les véhicules
+        # Init
         self.tracker = utils.VehicleTracker(max_distance=100, max_frames_missing=30)
         self.violation_count = 0
 
@@ -40,22 +33,21 @@ class VideoProcessorThread(threading.Thread):
         cap = cv2.VideoCapture(self.source)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Récupération du polygone en pixels
+
         polygon = utils.get_crosswalk_polygon(frame_width, frame_height, self.polygon_percent)
         
         while not self.stop_event.is_set():
             ret, frame = cap.read()
             if not ret: break
             
-            # --- Traitement YOLO ---
+            # YOLO treatment
             results = self.model(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)
             
             persons_in_zone = 0
             person_bboxes = []
             vehicle_bboxes = []
             
-            # 1. Trier les détections
+            # Sort detections
             for box in results[0].boxes:
                 cls_id = int(box.cls[0])
                 conf = float(box.conf[0])
@@ -71,7 +63,7 @@ class VideoProcessorThread(threading.Thread):
                     class_name = self.model.names[cls_id]
                     vehicle_bboxes.append((bbox, class_name, conf))
 
-            # 2. Tracking des véhicules et détection des violations
+            # Track vehicles + detection of violation
             vehicle_detections = [v[0] for v in vehicle_bboxes]
             if persons_in_zone > 0:
                 new_violations, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
@@ -81,7 +73,7 @@ class VideoProcessorThread(threading.Thread):
 
             current_violation = (persons_in_zone > 0 and len(vehicles_in_zone_bboxes) > 0)
             
-            # 3. Dessin des éléments sur la frame
+            # Draw elements
             processed_frame = frame.copy()
             
             for bbox, label, color in person_bboxes:
@@ -102,21 +94,17 @@ class VideoProcessorThread(threading.Thread):
                     color = config.COLOR_BLUE
                     is_viol = False
                 processed_frame = utils.draw_detection(processed_frame, bbox, label, color, is_violation=is_viol)
-            
-            # Dessiner le polygone rempli et le panneau
+
             processed_frame = utils.draw_crosswalk_polygon(processed_frame, polygon, current_violation)
             processed_frame = utils.draw_status_panel(processed_frame, persons_in_zone, len(vehicles_in_zone_bboxes), current_violation, self.violation_count)
             
             if current_violation:
                 processed_frame = utils.draw_violation_alert(processed_frame)
-            
-            # --- Préparation pour Tkinter (Thread-Safe et Optimisé) ---
-            # Redimensionnement ultra-rapide avec OpenCV (évite le lag de 1 FPS)
+
             processed_frame = cv2.resize(processed_frame, (self.canvas_width, self.canvas_height), interpolation=cv2.INTER_LINEAR)
             img = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
             img = PIL.Image.fromarray(img)
             
-            # Si la queue est pleine (l'interface galère à afficher), on jette la frame pour ne pas accumuler de retard
             if not self.frame_queue.full():
                 self.frame_queue.put(img)
 
@@ -128,21 +116,15 @@ class SmartCrosswalkApp:
         self.window.title("SafeWalk AI - Smart Crosswalk Monitor")
         self.window.geometry("1200x800")
         self.window.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
         self.stop_event = threading.Event()
-        # Limitation de la queue à 3 frames pour éviter l'accumulation de mémoire et les lags
         self.frame_queue = Queue(maxsize=3)
         self.model = None
         self.settings_file = "settings.json"
         self.source = None
-        
         self.points = []
         self.mode = "IDLE"
         self.current_frame_cv2 = None
-        
-        # On ne charge plus de polygone au démarrage pour obliger à calibrer sur la nouvelle vidéo
         self.polygon_percent = [] 
-
         self.setup_ui()
         self.process_queue()
 
@@ -156,25 +138,18 @@ class SmartCrosswalkApp:
 
         ttk.Label(self.controls, text="MENU", font=("Arial", 14, "bold")).pack(pady=10)
         
-        # Boutons sans émojis pour éviter les bugs d'affichage
         self.btn_open = ttk.Button(self.controls, text="Open video", command=self.open_source)
         self.btn_open.pack(fill=tk.X, pady=5)
-
         self.btn_calib = ttk.Button(self.controls, text="Manual Calibration", command=self.start_calibration)
         self.btn_calib.pack(fill=tk.X, pady=5)
-
         self.btn_auto_calib = ttk.Button(self.controls, text="Auto Calibration", command=self.start_auto_calibration)
         self.btn_auto_calib.pack(fill=tk.X, pady=5)
-
         self.btn_run = ttk.Button(self.controls, text="Start Detection", command=self.start_detection)
         self.btn_run.pack(fill=tk.X, pady=5)
-
         self.btn_stop = ttk.Button(self.controls, text="Stop", command=self.stop_all)
         self.btn_stop.pack(fill=tk.X, pady=5)
-
         self.status_label = ttk.Label(self.controls, text="Status: Ready", foreground="blue")
         self.status_label.pack(side=tk.BOTTOM, pady=20)
-
         self.CANVAS_W, self.CANVAS_H = 960, 540
         self.canvas = tk.Canvas(self.window, bg="black", width=self.CANVAS_W, height=self.CANVAS_H)
         self.canvas.pack(side=tk.RIGHT, expand=True)
@@ -184,11 +159,10 @@ class SmartCrosswalkApp:
     def display_first_frame(self, frame):
         self.current_frame_cv2 = frame
         
-        # Redimensionnement rapide via OpenCV
         frame_resized = cv2.resize(frame, (self.CANVAS_W, self.CANVAS_H), interpolation=cv2.INTER_LINEAR)
         img = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
         
-        # Dessiner le polygone s'il y en a un
+        # Draw polygon if already calibrated
         if self.polygon_percent and len(self.polygon_percent) >= 3:
             poly_px = utils.get_crosswalk_polygon(self.CANVAS_W, self.CANVAS_H, self.polygon_percent)
             cv2.polylines(img, [np.array(poly_px, np.int32)], True, (0, 255, 0), 2)
@@ -201,7 +175,7 @@ class SmartCrosswalkApp:
         path = filedialog.askopenfilename()
         if path:
             self.source = path
-            self.polygon_percent = [] # Reset du polygone quand on change de vidéo
+            self.polygon_percent = []
             self.status_label.config(text=f"Video loaded (Please calibrate)")
             cap = cv2.VideoCapture(self.source)
             ret, frame = cap.read()
@@ -301,8 +275,7 @@ class SmartCrosswalkApp:
         if not self.source:
             messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
             return
-            
-        # SÉCURITÉ : Empêche la détection si aucun polygone n'est calibré
+
         if not self.polygon_percent or len(self.polygon_percent) < 3:
             messagebox.showwarning("Calibration requise", "Veuillez d'abord calibrer la zone (Manuel ou Auto) avant de lancer la détection.")
             return
@@ -335,8 +308,6 @@ class SmartCrosswalkApp:
             try:
                 img = self.frame_queue.get_nowait()
                 self.photo = PIL.ImageTk.PhotoImage(image=img)
-                
-                # --- REMPLACE LA LIGNE create_image PAR CELLE-CI ---
                 self.canvas.itemconfig(self.canvas_image, image=self.photo)
                 
             except Empty:
