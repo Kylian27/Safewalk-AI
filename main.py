@@ -184,7 +184,6 @@ class SmartCrosswalkApp:
                 self.display_first_frame(frame)
 
     def get_auto_polygon(self, frame):
-        """Isole dynamiquement l'import d'auto_calibrate pour éviter les conflits de 'config'."""
         auto_calib_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'auto_calibrate'))
         
         root_config = sys.modules.get('config')
@@ -207,10 +206,10 @@ class SmartCrosswalkApp:
 
     def start_auto_calibration(self):
         if not self.source:
-            messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
+            messagebox.showwarning("Attention", "Please load a video first.")
             return
 
-        self.status_label.config(text="Status: IA Auto-Calib en cours...")
+        self.status_label.config(text="Status: IA Auto-Calib in progress...")
         self.window.update()
 
         cap = cv2.VideoCapture(self.source)
@@ -218,7 +217,7 @@ class SmartCrosswalkApp:
         cap.release()
 
         if not ret:
-            messagebox.showerror("Erreur", "Impossible de lire la vidéo.")
+            messagebox.showerror("Error", "Unable to read the video.")
             return
 
         try:
@@ -227,24 +226,24 @@ class SmartCrosswalkApp:
                 h, w = frame.shape[:2]
                 self.polygon_percent = [(int(pt[0]/w*100), int(pt[1]/h*100)) for pt in poly]
                 self.save_settings()
-                self.status_label.config(text="Status: Auto-Calibré")
-                messagebox.showinfo("Succès", "Passage piéton calibré automatiquement !")
+                self.status_label.config(text="Status: Auto-Calib Success")
+                messagebox.showinfo("Success", "Auto-Calibration completed successfully!")
                 self.display_first_frame(frame)
             else:
-                self.status_label.config(text="Status: Échec Auto-Calib")
-                messagebox.showerror("Erreur", "Aucun passage piéton détecté par l'IA.")
+                self.status_label.config(text="Status: Auto-Calib Failed")
+                messagebox.showerror("Error", "No pedestrian crossing detected by the AI.")
         except Exception as e:
-            self.status_label.config(text="Status: Erreur IA")
-            messagebox.showerror("Erreur", f"Erreur lors de l'auto-calibration:\n{str(e)}")
+            self.status_label.config(text="Status: AI Auto-Calib Error")
+            messagebox.showerror("Error", f"Error during auto-calibration:\n{str(e)}")
 
     def start_calibration(self):
         if not self.source:
-            messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
+            messagebox.showwarning("Attention", "Please load a video first.")
             return
         self.mode = "CALIBRATING"
         self.points = []
         self.canvas.delete("calibration")
-        self.status_label.config(text="Mode: Calibration (Cliquez 4 points)")
+        self.status_label.config(text="Mode: Calibration - Click 4 points to define the crosswalk zone")")
 
     def on_canvas_click(self, event):
         if self.mode != "CALIBRATING": return
@@ -266,23 +265,23 @@ class SmartCrosswalkApp:
             
             self.save_settings()
             self.mode = "IDLE"
-            messagebox.showinfo("Calibration", "Zone sauvegardée !")
-            self.status_label.config(text="Statut: Calibré manuellement")
+            messagebox.showinfo("Calibration", "Zone saved!")
+            self.status_label.config(text="Status: Calibration completed")
             if self.current_frame_cv2 is not None:
                 self.display_first_frame(self.current_frame_cv2)
 
     def start_detection(self):
         if not self.source:
-            messagebox.showwarning("Attention", "Veuillez charger une vidéo d'abord.")
+            messagebox.showwarning("Attention", "Please load a video first.")
             return
 
         if not self.polygon_percent or len(self.polygon_percent) < 3:
-            messagebox.showwarning("Calibration requise", "Veuillez d'abord calibrer la zone (Manuel ou Auto) avant de lancer la détection.")
+            messagebox.showwarning("Calibration required", "Please calibrate the zone (Manual or Auto) before starting detection.")
             return
             
         if self.mode == "RUNNING": return
         
-        self.status_label.config(text="Chargement IA...")
+        self.status_label.config(text="Status: Loading AI...")
         self.window.update()
         
         if not self.model:
@@ -301,7 +300,7 @@ class SmartCrosswalkApp:
         )
         self.processor_thread.start()
         self.mode = "RUNNING"
-        self.status_label.config(text="Statut: Détection en cours")
+        self.status_label.config(text="Status: Detection in progress")
 
     def process_queue(self):
         if self.mode == "RUNNING":
@@ -327,7 +326,7 @@ class SmartCrosswalkApp:
             
         self.stop_event.clear()
         self.mode = "IDLE"
-        self.status_label.config(text="Statut: Arrêté")
+        self.status_label.config(text="Status: Stopped")
     
     def on_closing(self):
         self.stop_all()

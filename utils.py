@@ -1,8 +1,3 @@
-"""
-Fonctions utilitaires et Tracker pour le Smart Crosswalk Monitor
-Avec gestion de zone polygone N points
-"""
-
 import cv2
 import numpy as np
 import config

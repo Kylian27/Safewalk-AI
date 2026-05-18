@@ -1,9 +1,3 @@
-"""
-Outil de calibration CLI.
-NB: L'application graphique (main.py) intègre maintenant un calibrage manuel plus ergonomique 
-et un calibrage automatique via AI. Ce script est conservé pour usage externe uniquement.
-"""
-
 import cv2
 import sys
 import numpy as np
@@ -21,7 +15,7 @@ def save_to_config(points_percent):
         with open(config_file, "r", encoding="utf-8") as f:
             content = f.read()
     except FileNotFoundError:
-        print(f"[ERREUR] Fichier {config_file} introuvable!")
+        print(f"[ERROR] File {config_file} not found!")
         return False
     
     new_value = "CROSSWALK_POLYGON_PERCENT = [\n"
@@ -39,7 +33,7 @@ def save_to_config(points_percent):
     with open(config_file, "w", encoding="utf-8") as f:
         f.write(new_content)
     
-    print(f"\n[OK] Configuration sauvegardée dans {config_file}!")
+    print(f"\n[OK] Configuration saved in {config_file}!")
     return True
 
 def mouse_callback(event, x, y, flags, param):
@@ -71,7 +65,7 @@ def mouse_callback(event, x, y, flags, param):
                     points_percent.append((px_pct, py_pct))
                 
                 if save_to_config(points_percent):
-                    print("\nAppuie 'Q' pour quitter ou 'R' pour recalibrer.")
+                    print("\nPress 'Q' to quit or 'R' to recalibrate.")
             else:
                 print(f"Point {len(points_clicked)}/4 ajouté.")
 
@@ -79,7 +73,7 @@ def main():
     global frame_display, original_frame, points_clicked, frame_width, frame_height
     
     if len(sys.argv) < 2:
-        print("Usage: python calibrate_zone.py <chemin_video>")
+        print("Usage: python calibrate_zone.py <video_path>")
         return
         
     source = sys.argv[1]
