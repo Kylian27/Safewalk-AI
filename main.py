@@ -243,7 +243,7 @@ class SmartCrosswalkApp:
         self.mode = "CALIBRATING"
         self.points = []
         self.canvas.delete("calibration")
-        self.status_label.config(text="Mode: Calibration - Click 4 points to define the crosswalk zone")")
+        self.status_label.config(text="Mode: Calibration - Click 4 points to define the crosswalk zone")
 
     def on_canvas_click(self, event):
         if self.mode != "CALIBRATING": return
