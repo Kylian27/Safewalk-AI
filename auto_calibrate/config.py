@@ -53,7 +53,7 @@ COLOR_JITTER      = dict(brightness=0.2, contrast=0.2, saturation=0.2)
 FINETUNE_COLOR_JITTER = dict(brightness=0.4, contrast=0.3, saturation=0.3)
 
 # ── Checkpoint filenames ────────────────────────────────────────────────────────
-FINETUNE_CKPT  = CKPT_DIR / "finetune_best.pt"
+FINETUNE_CKPT = MODELS_DIR / "finetune_best.pt"
 HISTORY_PATH   = LOG_DIR  / "history.pkl"
 
 # ── Device ─────────────────────────────────────────────────────────────────────

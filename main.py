@@ -195,7 +195,7 @@ class SmartCrosswalkApp:
         try:
             from poly_utils import load_model, predict_trimap, extract_polygon
             import config as ac_config
-            model = load_model(ac_config.BASE_CKPT)
+            model = load_model(ac_config.FINETUNE_CKPT)
             trimap = predict_trimap(model, frame)
             poly = extract_polygon(trimap)
             return poly

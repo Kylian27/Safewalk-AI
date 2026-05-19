@@ -60,11 +60,8 @@ def laplacian_sharpness(frame: np.ndarray) -> float:
     return cv2.Laplacian(gray, cv2.CV_64F).var()
 
 
-def pick_best_frame(video_path: str, sample_count: int = 10) -> np.ndarray | None:
-    """
-    영상에서 샤프니스·밝기 기준으로 가장 좋은 프레임 반환.
-    밝기가 [80, 200] 범위 밖이면 가중치 0.3 페널티.
-    """
+# 수정
+def pick_best_frame(video_path: str, sample_count: int = 30) -> np.ndarray | None:
     cap = cv2.VideoCapture(video_path)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if total == 0:
@@ -79,10 +76,16 @@ def pick_best_frame(video_path: str, sample_count: int = 10) -> np.ndarray | Non
         if not ret:
             continue
 
-        sharpness  = laplacian_sharpness(frame)
-        brightness = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean()
+        gray       = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        sharpness  = cv2.Laplacian(gray, cv2.CV_64F).var()
+        brightness = gray.mean()
         weight     = 1.0 if 80 < brightness < 200 else 0.3
-        score      = sharpness * weight
+
+        # 수직 엣지 밀도 — 횡단보도 줄무늬 패턴 감지
+        sobelx     = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        stripe_score = np.abs(sobelx).mean()
+
+        score = (sharpness * weight) + (stripe_score * 0.5)
 
         if score > best_score:
             best_score = score
@@ -90,7 +93,6 @@ def pick_best_frame(video_path: str, sample_count: int = 10) -> np.ndarray | Non
 
     cap.release()
     return best_frame
-
 
 # ── History ───────────────────────────────────────────────────────────────────
 
