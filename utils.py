@@ -1,6 +1,10 @@
 import cv2
 import numpy as np
 import config
+import os
+import time
+import threading
+from collections import deque
 
 def get_box_center(bbox):
     """Retourne le centre d'une bounding box."""
@@ -145,7 +149,7 @@ def draw_detection(frame, bbox, label, color, is_violation=False):
                 config.FONT_SCALE, config.COLOR_WHITE, config.FONT_THICKNESS)
     return frame
 
-def draw_status_panel(frame, persons_in_zone, vehicles_in_zone, violation, violation_count):
+def draw_status_panel(frame, persons_in_zone, vehicles_in_zone, violation, violation_count, ego_status=None):
     h, w = frame.shape[:2]
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, 100), (0, 0, 0), -1)
@@ -153,10 +157,22 @@ def draw_status_panel(frame, persons_in_zone, vehicles_in_zone, violation, viola
     
     cv2.putText(frame, "SMART CROSSWALK MONITOR", (10, 25), 
                 config.FONT, 0.8, config.COLOR_WHITE, 2)
-    cv2.putText(frame, f"Pedestrians in zone: {persons_in_zone}", 
-                (10, 55), config.FONT, 0.6, config.COLOR_YELLOW, 1)
-    cv2.putText(frame, f"Vehicles in zone: {vehicles_in_zone}", 
-                (10, 80), config.FONT, 0.6, config.COLOR_ORANGE, 1)
+    
+    if ego_status is not None:
+        cv2.putText(frame, f"Ego-car Status: {ego_status}", 
+                    (10, 55), config.FONT, 0.6, config.COLOR_WHITE, 1)
+        if "Monitoring" in ego_status or "Stopped" in ego_status:
+            cv2.putText(frame, f"Pedestrians: {persons_in_zone} | Vehicles: {vehicles_in_zone}", 
+                        (10, 80), config.FONT, 0.6, config.COLOR_YELLOW, 1)
+        else:
+            cv2.putText(frame, "Monitoring Suspended (Car Moving)", 
+                        (10, 80), config.FONT, 0.6, config.COLOR_BLUE, 1)
+    else:
+        cv2.putText(frame, f"Pedestrians in zone: {persons_in_zone}", 
+                    (10, 55), config.FONT, 0.6, config.COLOR_YELLOW, 1)
+        cv2.putText(frame, f"Vehicles in zone: {vehicles_in_zone}", 
+                    (10, 80), config.FONT, 0.6, config.COLOR_ORANGE, 1)
+
     cv2.putText(frame, f"Total Violations: {violation_count}", 
                 (w - 300, 55), config.FONT, 0.7, config.COLOR_RED, 2)
     
@@ -178,3 +194,146 @@ def draw_violation_alert(frame):
     cv2.putText(frame, alert_text, (text_x, h - 20), 
                 config.FONT, 1.0, config.COLOR_WHITE, 2)
     return frame
+
+class CameraMotionDetector:
+    def __init__(self, max_features=150, motion_threshold=None, stop_frames_required=None, move_frames_required=None):
+        self.max_features = max_features
+        self.motion_threshold = motion_threshold if motion_threshold is not None else config.MOTION_THRESHOLD
+        self.stop_frames_required = stop_frames_required if stop_frames_required is not None else config.STOP_FRAMES_REQUIRED
+        self.move_frames_required = move_frames_required if move_frames_required is not None else config.MOVE_FRAMES_REQUIRED
+        
+        self.lk_params = dict(
+            winSize=(15, 15),
+            maxLevel=2,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
+        )
+        self.prev_gray = None
+        self.prev_pts = None
+        self.consecutive_stop_frames = 0
+        self.consecutive_move_frames = 0
+        self.is_stopped = False
+
+    def update(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+        # Track features in the upper 70% of the frame (avoiding dashboard/hood at the bottom)
+        roi = gray[0:int(h*0.7), :]
+        
+        motion = 0.0
+        tracked = False
+        
+        if self.prev_gray is not None and self.prev_pts is not None and len(self.prev_pts) > 0:
+            next_pts, status, err = cv2.calcOpticalFlowPyrLK(
+                self.prev_gray, gray, self.prev_pts, None, **self.lk_params
+            )
+            
+            if next_pts is not None and status is not None:
+                good_prev = self.prev_pts[status == 1]
+                good_next = next_pts[status == 1]
+                
+                if len(good_prev) > 5:
+                    displacements = np.linalg.norm(good_next - good_prev, axis=1)
+                    # Median displacement handles outliers well (e.g. other moving objects)
+                    motion = float(np.median(displacements))
+                    tracked = True
+                    self.prev_pts = good_next.reshape(-1, 1, 2)
+                else:
+                    tracked = False
+                    
+        if not tracked:
+            pts = cv2.goodFeaturesToTrack(roi, maxCorners=self.max_features, qualityLevel=0.01, minDistance=10)
+            if pts is not None:
+                self.prev_pts = pts
+            else:
+                self.prev_pts = np.array([], dtype=np.float32).reshape(-1, 1, 2)
+            motion = 0.0
+            
+        self.prev_gray = gray.copy()
+        
+        if tracked:
+            if motion < self.motion_threshold:
+                self.consecutive_stop_frames += 1
+                self.consecutive_move_frames = 0
+                if self.consecutive_stop_frames >= self.stop_frames_required:
+                    self.is_stopped = True
+            else:
+                self.consecutive_move_frames += 1
+                self.consecutive_stop_frames = 0
+                if self.consecutive_move_frames >= self.move_frames_required:
+                    self.is_stopped = False
+                    
+        return self.is_stopped, motion
+
+class InfractionRecorder:
+    def __init__(self, output_dir=None, buffer_before_sec=None, duration_after_sec=None, fps=30.0):
+        self.output_dir = output_dir if output_dir is not None else config.INFRACTIONS_DIR
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        before_sec = buffer_before_sec if buffer_before_sec is not None else config.VIDEO_BUFFER_BEFORE_SEC
+        after_sec = duration_after_sec if duration_after_sec is not None else config.VIDEO_DURATION_AFTER_SEC
+        
+        self.fps = fps
+        self.buffer_size_before = int(before_sec * fps)
+        self.frames_after = int(after_sec * fps)
+        
+        self.frame_ring_buffer = deque(maxlen=self.buffer_size_before)
+        self.active_sessions = {}
+        self.session_lock = threading.Lock()
+
+    def add_frame(self, frame):
+        frame_copy = frame.copy()
+        self.frame_ring_buffer.append(frame_copy)
+        
+        finished_sessions = []
+        with self.session_lock:
+            for session_id, session in list(self.active_sessions.items()):
+                session["frames"].append(frame_copy)
+                if len(session["frames"]) >= session["total_frames_target"]:
+                    finished_sessions.append((session_id, session["frames"]))
+                    del self.active_sessions[session_id]
+                    
+        for session_id, frames in finished_sessions:
+            threading.Thread(
+                target=self._save_video,
+                args=(session_id, frames),
+                daemon=True
+            ).start()
+
+    def trigger_violation(self, frame, vehicle_id=None):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        v_str = f"veh_{vehicle_id}" if vehicle_id is not None else "unknown"
+        session_id = f"violation_{v_str}_{timestamp}"
+        
+        # Avoid duplicate overlapping sessions for the same vehicle in a short time
+        with self.session_lock:
+            for active_id in self.active_sessions:
+                if f"violation_{v_str}_" in active_id:
+                    return None
+                    
+            # Save screenshot immediately
+            screenshot_path = os.path.join(self.output_dir, f"{session_id}.jpg")
+            cv2.imwrite(screenshot_path, frame)
+            
+            # Start video session
+            initial_frames = list(self.frame_ring_buffer)
+            total_target = len(initial_frames) + self.frames_after
+            
+            self.active_sessions[session_id] = {
+                "frames": initial_frames,
+                "total_frames_target": total_target
+            }
+        return session_id
+
+    def _save_video(self, session_id, frames):
+        if not frames:
+            return
+        h, w, c = frames[0].shape
+        video_path = os.path.join(self.output_dir, f"{session_id}.mp4")
+        
+        # Write mp4 video
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(video_path, fourcc, self.fps, (w, h))
+        for f in frames:
+            out.write(f)
+        out.release()
+

@@ -13,8 +13,47 @@ from ultralytics import YOLO
 import utils
 import config
 
+class AutoCalibrator:
+    def __init__(self):
+        self.model = None
+        self.predict_trimap = None
+        self.extract_polygon = None
+        self.lock = threading.Lock()
+        
+    def load(self):
+        with self.lock:
+            if self.model is not None:
+                return
+            
+            auto_calib_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'auto_calibrate'))
+            
+            root_config = sys.modules.get('config')
+            root_utils = sys.modules.get('utils')
+            if 'config' in sys.modules: del sys.modules['config']
+            if 'utils' in sys.modules: del sys.modules['utils']
+            
+            sys.path.insert(0, auto_calib_dir)
+            try:
+                from poly_utils import load_model, predict_trimap, extract_polygon
+                import config as ac_config
+                self.model = load_model(ac_config.FINETUNE_CKPT)
+                self.predict_trimap = predict_trimap
+                self.extract_polygon = extract_polygon
+            finally:
+                sys.path.pop(0)
+                if root_config: sys.modules['config'] = root_config
+                if root_utils: sys.modules['utils'] = root_utils
+                
+    def calibrate(self, frame):
+        self.load()
+        if self.model is None:
+            return None
+        trimap = self.predict_trimap(self.model, frame)
+        poly = self.extract_polygon(trimap)
+        return poly
+
 class VideoProcessorThread(threading.Thread):
-    def __init__(self, source, model, polygon_percent, frame_queue, stop_event, canvas_width, canvas_height):
+    def __init__(self, source, model, polygon_percent, frame_queue, stop_event, canvas_width, canvas_height, moving_camera_mode=False):
         super().__init__()
         self.source = source
         self.model = model
@@ -24,6 +63,7 @@ class VideoProcessorThread(threading.Thread):
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
         self.daemon = True
+        self.moving_camera_mode = moving_camera_mode
         
         # Init
         self.tracker = utils.VehicleTracker(max_distance=100, max_frames_missing=30)
@@ -34,44 +74,123 @@ class VideoProcessorThread(threading.Thread):
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        polygon = utils.get_crosswalk_polygon(frame_width, frame_height, self.polygon_percent)
-        
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0 or np.isnan(fps):
+            fps = 30.0
+
+        if self.moving_camera_mode:
+            self.infraction_recorder = utils.InfractionRecorder(fps=fps)
+            self.motion_detector = utils.CameraMotionDetector()
+            self.auto_calibrator = AutoCalibrator()
+            ego_state = "Moving"
+            polygon = []
+            self.polygon_percent = []
+            calib_retry_counter = 0
+        else:
+            polygon = utils.get_crosswalk_polygon(frame_width, frame_height, self.polygon_percent)
+            ego_state = None
+
         while not self.stop_event.is_set():
             ret, frame = cap.read()
             if not ret: break
             
-            # YOLO treatment
-            results = self.model(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)
+            if self.moving_camera_mode:
+                is_stopped, motion = self.motion_detector.update(frame)
+                
+                if is_stopped:
+                    if ego_state == "Moving":
+                        ego_state = "Calibrating"
+                        status_frame = frame.copy()
+                        status_frame = utils.draw_status_panel(
+                            status_frame, 
+                            0, 0, False, self.violation_count,
+                            ego_status=ego_state
+                        )
+                        resized_status = cv2.resize(status_frame, (self.canvas_width, self.canvas_height), interpolation=cv2.INTER_LINEAR)
+                        img = cv2.cvtColor(resized_status, cv2.COLOR_BGR2RGB)
+                        img = PIL.Image.fromarray(img)
+                        if not self.frame_queue.full():
+                            self.frame_queue.put(img)
+                            
+                        poly = self.auto_calibrator.calibrate(frame)
+                        if poly is not None:
+                            self.polygon_percent = [(int(pt[0]/frame_width*100), int(pt[1]/frame_height*100)) for pt in poly]
+                            polygon = utils.get_crosswalk_polygon(frame_width, frame_height, self.polygon_percent)
+                            ego_state = "Stopped & Monitoring"
+                            calib_retry_counter = 0
+                        else:
+                            polygon = []
+                            self.polygon_percent = []
+                            ego_state = "Stopped (No Crosswalk)"
+                            calib_retry_counter = 0
+                    elif ego_state == "Stopped (No Crosswalk)":
+                        calib_retry_counter += 1
+                        if calib_retry_counter >= 30:  # Retry calibration every ~1 second (30 frames)
+                            calib_retry_counter = 0
+                            ego_state = "Calibrating"
+                            status_frame = frame.copy()
+                            status_frame = utils.draw_status_panel(
+                                status_frame, 
+                                0, 0, False, self.violation_count,
+                                ego_status=ego_state
+                            )
+                            resized_status = cv2.resize(status_frame, (self.canvas_width, self.canvas_height), interpolation=cv2.INTER_LINEAR)
+                            img = cv2.cvtColor(resized_status, cv2.COLOR_BGR2RGB)
+                            img = PIL.Image.fromarray(img)
+                            if not self.frame_queue.full():
+                                self.frame_queue.put(img)
+                                
+                            poly = self.auto_calibrator.calibrate(frame)
+                            if poly is not None:
+                                self.polygon_percent = [(int(pt[0]/frame_width*100), int(pt[1]/frame_height*100)) for pt in poly]
+                                polygon = utils.get_crosswalk_polygon(frame_width, frame_height, self.polygon_percent)
+                                ego_state = "Stopped & Monitoring"
+                            else:
+                                ego_state = "Stopped (No Crosswalk)"
+                else:
+                    if ego_state != "Moving":
+                        ego_state = "Moving"
+                        polygon = []
+                        self.polygon_percent = []
+                        self.tracker = utils.VehicleTracker(max_distance=100, max_frames_missing=30)
+            
+            # Track vehicles + detection of violation
+            monitoring_active = (not self.moving_camera_mode) or (ego_state == "Stopped & Monitoring")
             
             persons_in_zone = 0
             person_bboxes = []
             vehicle_bboxes = []
+            vehicles_in_zone_bboxes = []
             
-            # Sort detections
-            for box in results[0].boxes:
-                cls_id = int(box.cls[0])
-                conf = float(box.conf[0])
-                bbox = box.xyxy[0].tolist()
+            if monitoring_active:
+                # YOLO treatment
+                results = self.model(frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False)
                 
-                if cls_id == config.PERSON_CLASS_ID:
-                    if utils.is_in_zone(bbox, polygon):
-                        persons_in_zone += 1
-                        person_bboxes.append((bbox, f"Ped {conf:.0%} [IN]", config.COLOR_YELLOW))
+                # Sort detections
+                for box in results[0].boxes:
+                    cls_id = int(box.cls[0])
+                    conf = float(box.conf[0])
+                    bbox = box.xyxy[0].tolist()
+                    
+                    if cls_id == config.PERSON_CLASS_ID:
+                        if len(polygon) >= 3 and utils.is_in_zone(bbox, polygon):
+                            persons_in_zone += 1
+                            person_bboxes.append((bbox, f"Ped {conf:.0%} [IN]", config.COLOR_YELLOW))
+                        else:
+                            person_bboxes.append((bbox, f"Ped {conf:.0%}", config.COLOR_GREEN))
+                    elif cls_id in config.VEHICLE_CLASSES:
+                        class_name = self.model.names[cls_id]
+                        vehicle_bboxes.append((bbox, class_name, conf))
+
+                if len(polygon) >= 3:
+                    vehicle_detections = [v[0] for v in vehicle_bboxes]
+                    if persons_in_zone > 0:
+                        new_violations, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
+                        self.violation_count += new_violations
                     else:
-                        person_bboxes.append((bbox, f"Ped {conf:.0%}", config.COLOR_GREEN))
-                elif cls_id in config.VEHICLE_CLASSES:
-                    class_name = self.model.names[cls_id]
-                    vehicle_bboxes.append((bbox, class_name, conf))
+                        _, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
 
-            # Track vehicles + detection of violation
-            vehicle_detections = [v[0] for v in vehicle_bboxes]
-            if persons_in_zone > 0:
-                new_violations, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
-                self.violation_count += new_violations
-            else:
-                _, vehicles_in_zone_bboxes = self.tracker.update(vehicle_detections, polygon)
-
-            current_violation = (persons_in_zone > 0 and len(vehicles_in_zone_bboxes) > 0)
+            current_violation = (monitoring_active and persons_in_zone > 0 and len(vehicles_in_zone_bboxes) > 0)
             
             # Draw elements
             processed_frame = frame.copy()
@@ -80,7 +199,7 @@ class VideoProcessorThread(threading.Thread):
                 processed_frame = utils.draw_detection(processed_frame, bbox, label, color)
                 
             for bbox, class_name, conf in vehicle_bboxes:
-                in_zone = bbox in vehicles_in_zone_bboxes or utils.is_in_zone(bbox, polygon)
+                in_zone = monitoring_active and (bbox in vehicles_in_zone_bboxes or (len(polygon) >= 3 and utils.is_in_zone(bbox, polygon)))
                 if in_zone and persons_in_zone > 0:
                     label = f"{class_name} {conf:.0%} [VIOLATION]"
                     color = config.COLOR_RED
@@ -95,11 +214,28 @@ class VideoProcessorThread(threading.Thread):
                     is_viol = False
                 processed_frame = utils.draw_detection(processed_frame, bbox, label, color, is_violation=is_viol)
 
-            processed_frame = utils.draw_crosswalk_polygon(processed_frame, polygon, current_violation)
-            processed_frame = utils.draw_status_panel(processed_frame, persons_in_zone, len(vehicles_in_zone_bboxes), current_violation, self.violation_count)
+            if len(polygon) >= 3:
+                processed_frame = utils.draw_crosswalk_polygon(processed_frame, polygon, current_violation)
+                
+            processed_frame = utils.draw_status_panel(
+                processed_frame, 
+                persons_in_zone, 
+                len(vehicles_in_zone_bboxes), 
+                current_violation, 
+                self.violation_count,
+                ego_status=ego_state
+            )
             
             if current_violation:
                 processed_frame = utils.draw_violation_alert(processed_frame)
+
+            # If Moving Camera Mode, record infraction if active
+            if self.moving_camera_mode:
+                self.infraction_recorder.add_frame(processed_frame)
+                if current_violation:
+                    violating_ids = [vid for vid, vdata in self.tracker.vehicles.items() if vdata.get("in_zone", False)]
+                    for vid in violating_ids:
+                        self.infraction_recorder.trigger_violation(processed_frame, vehicle_id=vid)
 
             processed_frame = cv2.resize(processed_frame, (self.canvas_width, self.canvas_height), interpolation=cv2.INTER_LINEAR)
             img = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
@@ -144,6 +280,11 @@ class SmartCrosswalkApp:
         self.btn_calib.pack(fill=tk.X, pady=5)
         self.btn_auto_calib = ttk.Button(self.controls, text="Auto Calibration", command=self.start_auto_calibration)
         self.btn_auto_calib.pack(fill=tk.X, pady=5)
+        
+        self.moving_camera_var = tk.BooleanVar(value=False)
+        self.chk_moving = ttk.Checkbutton(self.controls, text="Moving Camera Mode", variable=self.moving_camera_var, command=self.toggle_moving_camera_mode)
+        self.chk_moving.pack(fill=tk.X, pady=10)
+        
         self.btn_run = ttk.Button(self.controls, text="Start Detection", command=self.start_detection)
         self.btn_run.pack(fill=tk.X, pady=5)
         self.btn_stop = ttk.Button(self.controls, text="Stop", command=self.stop_all)
@@ -155,6 +296,14 @@ class SmartCrosswalkApp:
         self.canvas.pack(side=tk.RIGHT, expand=True)
         self.canvas.bind("<Button-1>", self.on_canvas_click)
         self.canvas_image = self.canvas.create_image(0, 0, anchor=tk.NW)
+
+    def toggle_moving_camera_mode(self):
+        if self.moving_camera_var.get():
+            self.btn_calib.config(state=tk.DISABLED)
+            self.btn_auto_calib.config(state=tk.DISABLED)
+        else:
+            self.btn_calib.config(state=tk.NORMAL)
+            self.btn_auto_calib.config(state=tk.NORMAL)
 
     def display_first_frame(self, frame):
         self.current_frame_cv2 = frame
@@ -275,9 +424,11 @@ class SmartCrosswalkApp:
             messagebox.showwarning("Attention", "Please load a video first.")
             return
 
-        if not self.polygon_percent or len(self.polygon_percent) < 3:
-            messagebox.showwarning("Calibration required", "Please calibrate the zone (Manual or Auto) before starting detection.")
-            return
+        moving_cam = self.moving_camera_var.get()
+        if not moving_cam:
+            if not self.polygon_percent or len(self.polygon_percent) < 3:
+                messagebox.showwarning("Calibration required", "Please calibrate the zone (Manual or Auto) before starting detection.")
+                return
             
         if self.mode == "RUNNING": return
         
@@ -296,7 +447,8 @@ class SmartCrosswalkApp:
             self.frame_queue, 
             self.stop_event, 
             self.CANVAS_W, 
-            self.CANVAS_H
+            self.CANVAS_H,
+            moving_camera_mode=moving_cam
         )
         self.processor_thread.start()
         self.mode = "RUNNING"

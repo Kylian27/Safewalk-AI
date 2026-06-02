@@ -37,3 +37,21 @@ CROSSWALK_OVERLAY_ALPHA = 0.3
 FONT = 0
 FONT_SCALE = 0.7
 FONT_THICKNESS = 2
+
+# ============================================
+# Motion detection & moving camera settings
+# ============================================
+# Lowering this threshold makes the system more sensitive to slow movements.
+# If the car is moving very slowly or in a straight line, a lower value (e.g., 0.6 - 0.8) helps.
+# Avoid setting it too close to 0 to prevent camera noise/vibration from being seen as motion when stopped.
+MOTION_THRESHOLD = 0.1
+STOP_FRAMES_REQUIRED = 15
+MOVE_FRAMES_REQUIRED = 10
+
+# ============================================
+# Infraction recorder settings
+# ============================================
+INFRACTIONS_DIR = "infractions"
+VIDEO_BUFFER_BEFORE_SEC = 2.0
+VIDEO_DURATION_AFTER_SEC = 3.0
+
