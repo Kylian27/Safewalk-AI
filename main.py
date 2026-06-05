@@ -66,7 +66,7 @@ class MJPEGStreamReader:
     def frame_count(self) -> int:
         return self._frame_count
 
-    def _reader_loop(self, first_frame_event: threading.Event, first_frame_holder: list):
+    def _reader_loop(self, first_frame_event, first_frame_holder):
         first_frame_sent = False
         while self._running:
             try:
@@ -102,7 +102,8 @@ class MJPEGStreamReader:
                     time.sleep(0.1)
         print("[MJPEG] Reader stopped.")
 
-    def _stream_jpeg_scan(self, response, first_frame_event, first_frame_holder, first_frame_sent):
+    def _stream_jpeg_scan(self, response, first_frame_event,
+                          first_frame_holder, first_frame_sent):
         JPEG_START = b"\xff\xd8"
         JPEG_END = b"\xff\xd9"
         CHUNK_SIZE = 8192
@@ -140,15 +141,14 @@ class MJPEGStreamReader:
                     first_frame_holder[0] = frame.copy()
                     first_frame_event.set()
                     first_frame_sent = True
-                    print(f"[MJPEG] First frame decoded: {frame.shape}")
+                    print(f"[MJPEG] First frame: {frame.shape}")
                 if frames_decoded % 30 == 0:
-                    print(f"[MJPEG] {self._frame_count} frames received")
+                    print(f"[MJPEG] {self._frame_count} total frames received")
 
     def _decode_jpeg(self, data: bytes):
         try:
             arr = np.frombuffer(data, dtype=np.uint8)
-            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            return frame
+            return cv2.imdecode(arr, cv2.IMREAD_COLOR)
         except Exception:
             return None
 
@@ -284,16 +284,10 @@ class AutoCalibrator:
         if self.model is None:
             return None
         trimap = self.predict_trimap(self.model, frame)
-        poly = self.extract_polygon(trimap)
-        return poly
+        return self.extract_polygon(trimap)
 
 
 class LivePreviewThread(threading.Thread):
-    """
-    Continuously pulls frames from CaptureManager and pushes them
-    to the display queue. Runs whenever a source is open.
-    The app overlays calibration points on top via the canvas directly.
-    """
     def __init__(self, capture_manager, display_queue, stop_event,
                  canvas_width, canvas_height):
         super().__init__(name="LivePreview", daemon=True)
@@ -302,10 +296,18 @@ class LivePreviewThread(threading.Thread):
         self.stop_event = stop_event
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
+        # Shared polygon for overlay — set from main thread
+        self.polygon_percent = []
+        self._polygon_lock = threading.Lock()
+
+    def set_polygon(self, polygon_percent: list):
+        with self._polygon_lock:
+            self.polygon_percent = list(polygon_percent)
 
     def run(self):
         print("[Preview] Started")
         last_frame_count = -1
+        fps_counter = FPSCounter()
 
         while not self.stop_event.is_set():
             cm = self.capture_manager
@@ -327,6 +329,21 @@ class LivePreviewThread(threading.Thread):
                     time.sleep(0.033)
                     continue
 
+            fps = fps_counter.tick()
+
+            # Draw calibration polygon overlay if one exists
+            with self._polygon_lock:
+                poly = list(self.polygon_percent)
+
+            if poly and len(poly) >= 3:
+                polygon_px = utils.get_crosswalk_polygon(
+                    cm.frame_width, cm.frame_height, poly
+                )
+                frame = utils.draw_crosswalk_polygon(frame, polygon_px, False)
+
+            # Draw FPS and connection status
+            frame = self._draw_overlay(frame, fps, cm.is_live)
+
             frame_resized = cv2.resize(
                 frame, (self.canvas_width, self.canvas_height),
                 interpolation=cv2.INTER_LINEAR
@@ -339,13 +356,47 @@ class LivePreviewThread(threading.Thread):
 
         print("[Preview] Stopped")
 
+    def _draw_overlay(self, frame, fps, is_live):
+        h, w = frame.shape[:2]
+        source_text = "LIVE" if is_live else "FILE"
+        color = (0, 200, 0) if is_live else (200, 200, 0)
+        cv2.putText(
+            frame, f"{source_text} | {fps:.1f} FPS",
+            (w - 200, 30), config.FONT, 0.7, color, 2
+        )
+        cv2.putText(
+            frame, "PREVIEW MODE — No detection running",
+            (10, h - 15), config.FONT, 0.6, (200, 200, 200), 1
+        )
+        return frame
+
+
+class FPSCounter:
+    """Tracks real-time FPS using a rolling window."""
+    def __init__(self, window: int = 30):
+        self._times = []
+        self._window = window
+
+    def tick(self) -> float:
+        now = time.time()
+        self._times.append(now)
+        if len(self._times) > self._window:
+            self._times.pop(0)
+        if len(self._times) < 2:
+            return 0.0
+        return (len(self._times) - 1) / (self._times[-1] - self._times[0])
+
 
 class VideoProcessorThread(threading.Thread):
-    """
-    Runs YOLO detection on every new frame from CaptureManager.
-    """
+    # Max frames per second to send to YOLO.
+    # Frames arriving faster than this are skipped for YOLO
+    # but the latest frame is always shown.
+    YOLO_MAX_FPS = 12
+
     def __init__(self, capture_manager, model, polygon_percent, frame_queue,
-                 stop_event, canvas_width, canvas_height, moving_camera_mode=False):
+                 stop_event, canvas_width, canvas_height,
+                 moving_camera_mode=False, on_disconnect=None,
+                 on_violation_saved=None):
         super().__init__(name="VideoProcessor", daemon=True)
         self.capture_manager = capture_manager
         self.model = model
@@ -355,8 +406,12 @@ class VideoProcessorThread(threading.Thread):
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
         self.moving_camera_mode = moving_camera_mode
+        self.on_disconnect = on_disconnect
+        self.on_violation_saved = on_violation_saved
         self.tracker = utils.VehicleTracker(max_distance=100, max_frames_missing=30)
         self.violation_count = 0
+        self._fps_counter = FPSCounter()
+        self._yolo_fps_counter = FPSCounter()
 
     def run(self):
         cm = self.capture_manager
@@ -377,6 +432,10 @@ class VideoProcessorThread(threading.Thread):
             polygon = []
             self.polygon_percent = []
             calib_retry_counter = 0
+            # Run auto-calibration in a separate thread so it doesn't freeze the video
+            self._calib_lock = threading.Lock()
+            self._calib_running = False
+            self._calib_result = None
         else:
             polygon = utils.get_crosswalk_polygon(
                 frame_width, frame_height, self.polygon_percent
@@ -385,6 +444,12 @@ class VideoProcessorThread(threading.Thread):
 
         last_frame_count = -1
         frame_count = 0
+        last_yolo_time = 0.0
+        yolo_interval = 1.0 / self.YOLO_MAX_FPS
+
+        # Track disconnection
+        consecutive_no_frame = 0
+        MAX_NO_FRAME = 60
 
         while not self.stop_event.is_set():
             if cm.is_live:
@@ -398,67 +463,42 @@ class VideoProcessorThread(threading.Thread):
 
             if not ret or frame is None:
                 if cm.is_live:
+                    consecutive_no_frame += 1
+                    if consecutive_no_frame >= MAX_NO_FRAME:
+                        print("[Processor] Stream lost — notifying UI")
+                        if self.on_disconnect:
+                            self.on_disconnect()
+                        break
                     time.sleep(0.033)
                     continue
                 else:
                     print("[Processor] End of file")
                     break
 
+            consecutive_no_frame = 0
             frame_count += 1
+            display_fps = self._fps_counter.tick()
+
+            # Handle resolution change mid-stream (phone rotation)
+            h, w = frame.shape[:2]
+            if w != frame_width or h != frame_height:
+                print(f"[Processor] Resolution changed: {frame_width}x{frame_height}"
+                      f" -> {w}x{h}")
+                frame_width, frame_height = w, h
+                if not self.moving_camera_mode and len(self.polygon_percent) >= 3:
+                    polygon = utils.get_crosswalk_polygon(
+                        frame_width, frame_height, self.polygon_percent
+                    )
 
             if self.moving_camera_mode:
-                is_stopped, motion = self.motion_detector.update(frame)
+                ego_state, polygon, calib_retry_counter = self._handle_moving_camera(
+                    frame, frame_width, frame_height,
+                    ego_state, polygon, calib_retry_counter
+                )
 
-                if is_stopped:
-                    if ego_state == "Moving":
-                        ego_state = "Calibrating"
-                        self._push_status_frame(frame, ego_state)
-                        poly = self.auto_calibrator.calibrate(frame)
-                        if poly is not None:
-                            self.polygon_percent = [
-                                (int(pt[0] / frame_width * 100),
-                                 int(pt[1] / frame_height * 100))
-                                for pt in poly
-                            ]
-                            polygon = utils.get_crosswalk_polygon(
-                                frame_width, frame_height, self.polygon_percent
-                            )
-                            ego_state = "Stopped & Monitoring"
-                            calib_retry_counter = 0
-                        else:
-                            polygon = []
-                            self.polygon_percent = []
-                            ego_state = "Stopped (No Crosswalk)"
-                            calib_retry_counter = 0
-
-                    elif ego_state == "Stopped (No Crosswalk)":
-                        calib_retry_counter += 1
-                        if calib_retry_counter >= 30:
-                            calib_retry_counter = 0
-                            ego_state = "Calibrating"
-                            self._push_status_frame(frame, ego_state)
-                            poly = self.auto_calibrator.calibrate(frame)
-                            if poly is not None:
-                                self.polygon_percent = [
-                                    (int(pt[0] / frame_width * 100),
-                                     int(pt[1] / frame_height * 100))
-                                    for pt in poly
-                                ]
-                                polygon = utils.get_crosswalk_polygon(
-                                    frame_width, frame_height, self.polygon_percent
-                                )
-                                ego_state = "Stopped & Monitoring"
-                            else:
-                                ego_state = "Stopped (No Crosswalk)"
-                else:
-                    if ego_state != "Moving":
-                        ego_state = "Moving"
-                        polygon = []
-                        self.polygon_percent = []
-                        self.tracker = utils.VehicleTracker(
-                            max_distance=100, max_frames_missing=30
-                        )
-
+            # Throttle YOLO to YOLO_MAX_FPS
+            now = time.time()
+            run_yolo = (now - last_yolo_time) >= yolo_interval
             monitoring_active = (
                 not self.moving_camera_mode or ego_state == "Stopped & Monitoring"
             )
@@ -468,7 +508,9 @@ class VideoProcessorThread(threading.Thread):
             vehicle_bboxes = []
             vehicles_in_zone_bboxes = []
 
-            if monitoring_active:
+            if monitoring_active and run_yolo:
+                last_yolo_time = now
+                self._yolo_fps_counter.tick()
                 results = self.model(
                     frame, conf=config.CONFIDENCE_THRESHOLD, verbose=False
                 )
@@ -553,6 +595,10 @@ class VideoProcessorThread(threading.Thread):
             if current_violation:
                 processed_frame = utils.draw_violation_alert(processed_frame)
 
+            # Draw FPS counters
+            yolo_fps = self._yolo_fps_counter.tick() if run_yolo else None
+            processed_frame = self._draw_fps(processed_frame, display_fps, yolo_fps)
+
             if self.moving_camera_mode:
                 self.infraction_recorder.add_frame(processed_frame)
                 if current_violation:
@@ -561,9 +607,11 @@ class VideoProcessorThread(threading.Thread):
                         if vdata.get("in_zone", False)
                     ]
                     for vid in violating_ids:
-                        self.infraction_recorder.trigger_violation(
+                        session = self.infraction_recorder.trigger_violation(
                             processed_frame, vehicle_id=vid
                         )
+                        if session and self.on_violation_saved:
+                            self.on_violation_saved(session)
 
             processed_frame = cv2.resize(
                 processed_frame, (self.canvas_width, self.canvas_height),
@@ -576,6 +624,86 @@ class VideoProcessorThread(threading.Thread):
                 self.frame_queue.put(img)
 
         print(f"[Processor] Stopped after {frame_count} frames")
+
+    def _handle_moving_camera(self, frame, frame_width, frame_height,
+                               ego_state, polygon, calib_retry_counter):
+        is_stopped, motion = self.motion_detector.update(frame)
+
+        if is_stopped:
+            if ego_state == "Moving":
+                ego_state = "Calibrating"
+                self._push_status_frame(frame, ego_state)
+                self._run_calibration_async(frame, frame_width, frame_height)
+
+            elif ego_state == "Calibrating":
+                with self._calib_lock:
+                    result = self._calib_result
+                    self._calib_result = None
+                if result == "failed":
+                    polygon = []
+                    self.polygon_percent = []
+                    ego_state = "Stopped (No Crosswalk)"
+                    calib_retry_counter = 0
+                elif result is not None:
+                    self.polygon_percent = result
+                    polygon = utils.get_crosswalk_polygon(
+                        frame_width, frame_height, self.polygon_percent
+                    )
+                    ego_state = "Stopped & Monitoring"
+                    calib_retry_counter = 0
+
+            elif ego_state == "Stopped (No Crosswalk)":
+                calib_retry_counter += 1
+                if calib_retry_counter >= 30:
+                    calib_retry_counter = 0
+                    ego_state = "Calibrating"
+                    self._push_status_frame(frame, ego_state)
+                    self._run_calibration_async(frame, frame_width, frame_height)
+        else:
+            if ego_state != "Moving":
+                ego_state = "Moving"
+                polygon = []
+                self.polygon_percent = []
+                self.tracker = utils.VehicleTracker(
+                    max_distance=100, max_frames_missing=30
+                )
+
+        return ego_state, polygon, calib_retry_counter
+
+    def _run_calibration_async(self, frame, frame_width, frame_height):
+        with self._calib_lock:
+            if self._calib_running:
+                return
+            self._calib_running = True
+            self._calib_result = None
+
+        def _do_calib():
+            poly = self.auto_calibrator.calibrate(frame)
+            with self._calib_lock:
+                if poly is not None:
+                    self._calib_result = [
+                        (int(pt[0] / frame_width * 100),
+                         int(pt[1] / frame_height * 100))
+                        for pt in poly
+                    ]
+                else:
+                    self._calib_result = "failed"
+                self._calib_running = False
+
+        threading.Thread(target=_do_calib, daemon=True, name="AutoCalib").start()
+
+    def _draw_fps(self, frame, display_fps, yolo_fps):
+        h, w = frame.shape[:2]
+        cv2.putText(
+            frame, f"Display: {display_fps:.1f} FPS",
+            (w - 220, 30), config.FONT, 0.6, config.COLOR_WHITE, 1
+        )
+        if yolo_fps is not None:
+            cv2.putText(
+                frame, f"YOLO: {yolo_fps:.1f} FPS",
+                (w - 220, 55), config.FONT, 0.6, config.COLOR_YELLOW, 1
+            )
+        return frame
 
     def _push_status_frame(self, frame, ego_state):
         status_frame = frame.copy()
@@ -604,14 +732,10 @@ class SmartCrosswalkApp:
         self.model = None
         self.settings_file = "settings.json"
         self.points = []
-
-        # IDLE       -> nothing open
-        # PREVIEW    -> live feed shown, no YOLO
-        # CALIBRATING-> live feed shown, user clicking points (still PREVIEW underneath)
-        # RUNNING    -> YOLO detection active
         self.mode = "IDLE"
         self.polygon_percent = []
         self.capture_manager = CaptureManager()
+        self.violation_log = []
 
         self._preview_stop = threading.Event()
         self._preview_thread = None
@@ -620,6 +744,7 @@ class SmartCrosswalkApp:
 
         self.setup_ui()
         self.process_queue()
+        self.check_stream_health()
 
     def save_settings(self):
         with open(self.settings_file, "w") as f:
@@ -630,7 +755,7 @@ class SmartCrosswalkApp:
         self.controls.pack(side=tk.LEFT, fill=tk.Y)
 
         ttk.Label(
-            self.controls, text="MENU", font=("Arial", 14, "bold")
+            self.controls, text="SafeWalk AI", font=("Arial", 14, "bold")
         ).pack(pady=10)
 
         self.btn_open = ttk.Button(
@@ -666,8 +791,28 @@ class SmartCrosswalkApp:
         )
         self.btn_stop.pack(fill=tk.X, pady=5)
 
+        ttk.Separator(self.controls, orient="horizontal").pack(fill=tk.X, pady=10)
+
+        self.btn_recordings = ttk.Button(
+            self.controls, text="View Recordings",
+            command=self.open_recordings_folder
+        )
+        self.btn_recordings.pack(fill=tk.X, pady=5)
+
+        self.violation_count_label = ttk.Label(
+            self.controls, text="Violations: 0", font=("Arial", 11, "bold"),
+            foreground="red"
+        )
+        self.violation_count_label.pack(pady=5)
+
+        self.stream_health_label = ttk.Label(
+            self.controls, text="", foreground="gray"
+        )
+        self.stream_health_label.pack(pady=2)
+
         self.status_label = ttk.Label(
-            self.controls, text="Status: Ready", foreground="blue"
+            self.controls, text="Status: Ready", foreground="blue",
+            wraplength=200
         )
         self.status_label.pack(side=tk.BOTTOM, pady=20)
 
@@ -690,13 +835,15 @@ class SmartCrosswalkApp:
     def _start_preview_thread(self):
         self._stop_preview_thread()
         self._preview_stop.clear()
-        self._preview_thread = LivePreviewThread(
+        preview = LivePreviewThread(
             capture_manager=self.capture_manager,
             display_queue=self.display_queue,
             stop_event=self._preview_stop,
             canvas_width=self.CANVAS_W,
             canvas_height=self.CANVAS_H,
         )
+        preview.set_polygon(self.polygon_percent)
+        self._preview_thread = preview
         self._preview_thread.start()
 
     def _stop_preview_thread(self):
@@ -719,6 +866,62 @@ class SmartCrosswalkApp:
                 self.display_queue.get_nowait()
             except Empty:
                 break
+
+    def _on_stream_disconnect(self):
+        self.window.after(0, self._handle_disconnect_on_main_thread)
+
+    def _handle_disconnect_on_main_thread(self):
+        if self.mode == "RUNNING":
+            self._stop_processor_thread()
+            self._flush_display_queue()
+            self.mode = "IDLE"
+            self.status_label.config(
+                text="Status: Stream disconnected. Reconnect your phone."
+            )
+            messagebox.showwarning(
+                "Stream Lost",
+                "The DroidCam stream was lost.\n"
+                "Please check your phone and reconnect."
+            )
+
+    def _on_violation_saved(self, session_id: str):
+        self.violation_log.append({
+            "session": session_id,
+            "time": time.strftime("%H:%M:%S")
+        })
+        total = len(self.violation_log)
+        self.window.after(
+            0,
+            lambda: self.violation_count_label.config(
+                text=f"Violations recorded: {total}"
+            )
+        )
+
+    def check_stream_health(self):
+        if self.capture_manager.is_live and self.capture_manager.is_open:
+            reader = self.capture_manager._mjpeg_reader
+            if reader:
+                fc = reader.frame_count
+                self.stream_health_label.config(
+                    text=f"Stream frames: {fc}", foreground="green"
+                )
+        elif self.capture_manager.is_live and not self.capture_manager.is_open:
+            self.stream_health_label.config(
+                text="Stream: disconnected", foreground="red"
+            )
+        else:
+            self.stream_health_label.config(text="")
+        self.window.after(1000, self.check_stream_health)
+
+    def open_recordings_folder(self):
+        folder = os.path.abspath(config.INFRACTIONS_DIR)
+        os.makedirs(folder, exist_ok=True)
+        if sys.platform == "win32":
+            os.startfile(folder)
+        elif sys.platform == "darwin":
+            os.system(f'open "{folder}"')
+        else:
+            os.system(f'xdg-open "{folder}"')
 
     def open_source(self):
         from tkinter import simpledialog
@@ -818,8 +1021,7 @@ class SmartCrosswalkApp:
             import config as ac_config
             model = load_model(ac_config.FINETUNE_CKPT)
             trimap = predict_trimap(model, frame)
-            poly = extract_polygon(trimap)
-            return poly
+            return extract_polygon(trimap)
         finally:
             sys.path.pop(0)
             if root_config: sys.modules['config'] = root_config
@@ -847,10 +1049,12 @@ class SmartCrosswalkApp:
                     for pt in poly
                 ]
                 self.save_settings()
+                if self._preview_thread is not None:
+                    self._preview_thread.set_polygon(self.polygon_percent)
                 self.status_label.config(
                     text="Status: Auto-Calibration done — ready to start detection"
                 )
-                messagebox.showinfo("Success", "Auto-calibration completed successfully!")
+                messagebox.showinfo("Success", "Auto-calibration completed!")
             else:
                 self.status_label.config(text="Status: Auto-Calibration failed")
                 messagebox.showerror(
@@ -877,7 +1081,6 @@ class SmartCrosswalkApp:
 
         x, y = event.x, event.y
         self.points.append((x, y))
-
         self.canvas.create_oval(
             x - 5, y - 5, x + 5, y + 5,
             fill="red", outline="white", tags="calibration"
@@ -899,6 +1102,8 @@ class SmartCrosswalkApp:
                 ))
             self.save_settings()
             self.canvas.delete("calibration")
+            if self._preview_thread is not None:
+                self._preview_thread.set_polygon(self.polygon_percent)
             self.mode = "PREVIEW"
             messagebox.showinfo("Calibration", "Zone saved successfully!")
             self.status_label.config(
@@ -931,6 +1136,8 @@ class SmartCrosswalkApp:
         self._stop_preview_thread()
         self._flush_display_queue()
         self.capture_manager.reset_to_start()
+        self.violation_log = []
+        self.violation_count_label.config(text="Violations recorded: 0")
 
         self._processor_stop.clear()
         self._processor_thread = VideoProcessorThread(
@@ -942,6 +1149,8 @@ class SmartCrosswalkApp:
             canvas_width=self.CANVAS_W,
             canvas_height=self.CANVAS_H,
             moving_camera_mode=moving_cam,
+            on_disconnect=self._on_stream_disconnect,
+            on_violation_saved=self._on_violation_saved,
         )
         self._processor_thread.start()
         self.mode = "RUNNING"
@@ -955,7 +1164,9 @@ class SmartCrosswalkApp:
         if self.capture_manager.is_open:
             self._start_preview_thread()
             self.mode = "PREVIEW"
-            self.status_label.config(text="Status: Detection stopped — live preview active")
+            self.status_label.config(
+                text="Status: Detection stopped — live preview active"
+            )
         else:
             self.mode = "IDLE"
             self.status_label.config(text="Status: Stopped")
