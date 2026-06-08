@@ -44,9 +44,9 @@ FONT_THICKNESS = 2
 # Lowering this threshold makes the system more sensitive to slow movements.
 # If the car is moving very slowly or in a straight line, a lower value (e.g., 0.6 - 0.8) helps.
 # Avoid setting it too close to 0 to prevent camera noise/vibration from being seen as motion when stopped.
-MOTION_THRESHOLD = 0.1
-STOP_FRAMES_REQUIRED = 15
-MOVE_FRAMES_REQUIRED = 10
+MOTION_THRESHOLD = 1.5
+STOP_FRAMES_REQUIRED = 25
+MOVE_FRAMES_REQUIRED = 8
 
 # ============================================
 # Infraction recorder settings
