@@ -7,16 +7,16 @@ import threading
 from collections import deque
 
 def get_box_center(bbox):
-    """Retourne le centre d'une bounding box."""
+    """Calculates the center point of a bounding box given in the format (x1, y1, x2, y2). This function takes the coordinates of the top-left and bottom-right corners of the bounding box, computes the average of the x-coordinates and the average of the y-coordinates to find the center point. The resulting center point is returned as a tuple (center_x, center_y)."""
     x1, y1, x2, y2 = bbox
     return ((x1 + x2) / 2, (y1 + y2) / 2)
 
 def distance(p1, p2):
-    """Distance euclidienne entre deux points."""
+    """Calculates the Euclidean distance between two points."""
     return ((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2) ** 0.5
 
 class VehicleTracker:
-    """Tracker simple pour éviter de compter plusieurs fois la même violation."""
+    """Simple tracker to avoid counting the same violation multiple times."""
     def __init__(self, max_distance=100, max_frames_missing=30):
         self.vehicles = {}
         self.next_id = 0
@@ -24,6 +24,7 @@ class VehicleTracker:
         self.max_frames_missing = max_frames_missing
     
     def update(self, detections, polygon):
+        """Updates the tracker with new detections and checks for violations. This method takes a list of detected bounding boxes and the crosswalk polygon as input. It attempts to match each detection to existing tracked vehicles based on proximity. If a detection is close enough to an existing vehicle, it updates that vehicle's information. If a detection is in the crosswalk zone and has not been marked as a violator, it marks it as a violation. The method also handles adding new vehicles to the tracker and removing vehicles that have been missing for too many frames. Finally, it returns the number of new violations detected in this update and a list of vehicles currently in the zone."""
         new_violations = 0
         vehicles_in_zone = []
         matched_ids = set()
@@ -84,7 +85,7 @@ class VehicleTracker:
         return new_violations, vehicles_in_zone
 
 def point_in_polygon(x, y, polygon):
-    """Algorithme ray-casting pour polygone à N côtés"""
+    """Determines if a point (x, y) is inside a polygon defined by a list of vertices. This function uses the ray-casting algorithm to count how many times a horizontal ray, extending from the point to the right, intersects with the edges of the polygon. If the number of intersections is odd, the point is inside the polygon; if even, it is outside. The function returns True if the point is inside the polygon and False otherwise."""
     n = len(polygon)
     inside = False
     if n < 3: return inside
@@ -102,6 +103,7 @@ def point_in_polygon(x, y, polygon):
     return inside
 
 def get_crosswalk_polygon(frame_width, frame_height, polygon_percent=None):
+    """Converts percentage-based polygon coordinates to pixel coordinates for the current video frame. This function takes the width and height of the video frame, as well as an optional list of polygon points defined as percentages of the frame dimensions. If no polygon_percent is provided, it uses the CROSSWALK_POLYGON_PERCENT from the config. It iterates through each point defined in percentage terms, calculates the corresponding pixel coordinates based on the frame dimensions, and returns a list of points that define the crosswalk polygon in pixel coordinates."""
     if polygon_percent is None:
         polygon_percent = config.CROSSWALK_POLYGON_PERCENT
     polygon = []
@@ -112,6 +114,7 @@ def get_crosswalk_polygon(frame_width, frame_height, polygon_percent=None):
     return polygon
 
 def is_in_zone(bbox, polygon):
+    """Determines if a bounding box is inside the crosswalk polygon. This function checks if any of the key points of the bounding box (the bottom center, bottom left, bottom right, and center) are located within the defined polygon. It uses the point_in_polygon function to check each of these points against the polygon vertices. If any of these points are found to be inside the polygon, the function returns True, indicating that the bounding box is considered to be in the crosswalk zone; otherwise, it returns False."""
     x1, y1, x2, y2 = [int(c) for c in bbox]
     # bbox 꼭짓점 4개 + 하단 중심점 중 하나라도 폴리곤 안이면 True
     check_points = [
@@ -123,6 +126,7 @@ def is_in_zone(bbox, polygon):
     return any(point_in_polygon(px, py, polygon) for px, py in check_points)
 
 def draw_crosswalk_polygon(frame, polygon, violation=False):
+    """Draws the crosswalk polygon on the video frame. This function takes the video frame, a list of polygon points, and a boolean indicating whether there is a violation. It creates an overlay to draw the filled polygon with a color that indicates the status (red for violation, green for normal). It also draws the polygon outline and adds a label to indicate whether it is a violation zone or a normal crosswalk zone. The modified frame with the drawn polygon is returned for display."""
     overlay = frame.copy()
     color = config.COLOR_RED if violation else config.COLOR_GREEN
     pts = np.array(polygon, np.int32)
@@ -139,6 +143,7 @@ def draw_crosswalk_polygon(frame, polygon, violation=False):
     return frame
 
 def draw_detection(frame, bbox, label, color, is_violation=False):
+    """Draws a detection bounding box with a label on the video frame. This function takes the video frame, the bounding box coordinates, a label for the detected object, a color for the box and text, and a boolean indicating whether this detection is a violation. It draws a rectangle around the detected object, adds a filled rectangle for the label background, and puts the label text on top. The thickness of the bounding box is increased if it is a violation to make it more noticeable. The modified frame with the drawn detection is returned for display."""
     x1, y1, x2, y2 = [int(c) for c in bbox]
     thickness = 3 if is_violation else 2
     
@@ -150,6 +155,7 @@ def draw_detection(frame, bbox, label, color, is_violation=False):
     return frame
 
 def draw_status_panel(frame, persons_in_zone, vehicles_in_zone, violation, violation_count, ego_status=None):
+    """Draws the status panel on the video frame. This function creates a semi-transparent overlay at the top of the video frame to display important information such as the current status of the ego-car, the number of pedestrians and vehicles in the crosswalk zone, and the total count of violations detected. It also indicates whether a violation is currently detected with a prominent message. The modified frame with the status panel is returned for display."""
     h, w = frame.shape[:2]
     overlay = frame.copy()
     cv2.rectangle(overlay, (0, 0), (w, 100), (0, 0, 0), -1)
@@ -185,6 +191,7 @@ def draw_status_panel(frame, persons_in_zone, vehicles_in_zone, violation, viola
     return frame
 
 def draw_violation_alert(frame):
+    """Draws a violation alert on the video frame. This function creates a red border around the entire frame and displays a prominent warning message at the bottom of the screen to alert viewers that a vehicle has failed to yield to a pedestrian. The modified frame with the violation alert is returned for display."""
     h, w = frame.shape[:2]
     cv2.rectangle(frame, (0, 0), (w, h), config.COLOR_RED, 8)
     alert_text = "WARNING: Vehicle did not yield to pedestrian!"
@@ -196,6 +203,7 @@ def draw_violation_alert(frame):
     return frame
 
 class CameraMotionDetector:
+    """Detects if the camera (ego-car) is stopped or moving based on optical flow. This class uses the Lucas-Kanade method to track feature points across video frames and calculates the median motion of these points. If the median motion is below a certain threshold for a specified number of consecutive frames, it considers the camera to be stopped. If the motion exceeds the threshold for a certain number of consecutive frames, it considers the camera to be moving. The update method processes each new frame and returns the current status (stopped or moving) along with the calculated motion value."""
     def __init__(self, max_features=150, motion_threshold=None, stop_frames_required=None, move_frames_required=None):
         self.max_features = max_features
         self.motion_threshold = motion_threshold if motion_threshold is not None else config.MOTION_THRESHOLD
@@ -214,6 +222,7 @@ class CameraMotionDetector:
         self.is_stopped = False
 
     def update(self, frame):
+        """Processes a new video frame to determine if the camera is stopped or moving. This method converts the current frame to grayscale, detects and tracks feature points using optical flow, and calculates the median motion of these points. Based on the motion value and the number of consecutive frames that meet the stop or move criteria, it updates the internal state of whether the camera is considered stopped or moving. It returns a tuple indicating the current status (True for stopped, False for moving) and the calculated motion value."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         # Track features in the upper 70% of the frame (avoiding dashboard/hood at the bottom)
@@ -265,6 +274,7 @@ class CameraMotionDetector:
         return self.is_stopped, motion
 
 class InfractionRecorder:
+    """Records video clips of detected violations. This class maintains a ring buffer of recent video frames and manages active recording sessions for each detected violation. When a violation is triggered, it saves a screenshot immediately and starts a new recording session that includes the buffered frames before the violation and continues to record for a specified duration after the violation. The recorded video clips are saved in the specified output directory with unique filenames based on the timestamp and vehicle ID (if available). The class uses threading to save videos without blocking the main processing loop."""
     def __init__(self, output_dir=None, buffer_before_sec=None, duration_after_sec=None, fps=30.0):
         self.output_dir = output_dir if output_dir is not None else config.INFRACTIONS_DIR
         os.makedirs(self.output_dir, exist_ok=True)
@@ -281,6 +291,7 @@ class InfractionRecorder:
         self.session_lock = threading.Lock()
 
     def add_frame(self, frame):
+        """Adds a new video frame to the ring buffer and updates active recording sessions. This method should be called for each new frame processed in the main loop. It appends the current frame to the ring buffer, then iterates through any active recording sessions and adds the frame to their respective buffers. If any session has reached its target number of frames (including both buffered frames before the violation and frames recorded after), it finalizes that session by starting a new thread to save the video clip and removes it from the active sessions list."""
         frame_copy = frame.copy()
         self.frame_ring_buffer.append(frame_copy)
         
@@ -300,6 +311,7 @@ class InfractionRecorder:
             ).start()
 
     def trigger_violation(self, frame, vehicle_id=None):
+        """Triggers a new violation recording session. This method should be called when a new violation is detected. It generates a unique session ID based on the current timestamp and the vehicle ID (if available), checks for existing active sessions for the same vehicle to avoid duplicates, saves a screenshot of the current frame immediately, and starts a new recording session that includes the buffered frames before the violation and continues to record for a specified duration after. The session information is stored in the active_sessions dictionary, which will be processed in subsequent calls to add_frame to build the video clip."""
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         v_str = f"veh_{vehicle_id}" if vehicle_id is not None else "unknown"
         session_id = f"violation_{v_str}_{timestamp}"
@@ -325,6 +337,7 @@ class InfractionRecorder:
         return session_id
 
     def _save_video(self, session_id, frames):
+        """Saves a video clip for a completed violation session. This method is run in a separate thread to avoid blocking the main processing loop. It takes the session ID and the list of frames that make up the video clip, checks if there are frames to save, and writes them to an MP4 file in the output directory with a filename based on the session ID."""
         if not frames:
             return
         h, w, c = frames[0].shape

@@ -10,6 +10,7 @@ frame_width = 0
 frame_height = 0
 
 def save_to_config(points_percent):
+    """Saves the calibrated crosswalk polygon points as percentage coordinates in the config.py file. This function reads the existing config.py file, updates or adds the CROSSWALK_POLYGON_PERCENT variable with the new points, and writes the changes back to the file. The points are saved in a format that can be easily imported and used by the main application for detection and processing."""
     config_file = "config.py"
     try:
         with open(config_file, "r", encoding="utf-8") as f:
@@ -37,6 +38,7 @@ def save_to_config(points_percent):
     return True
 
 def mouse_callback(event, x, y, flags, param):
+    """Handles mouse click events for calibrating the crosswalk zone. When the user clicks on the video frame, this function records the click coordinates as points for defining the crosswalk polygon. It visually marks the clicked points and draws lines between them to form a polygon. Once 4 points are defined, it converts them to percentage coordinates, saves them to the config file, and provides feedback to the user."""
     global points_clicked, frame_display, original_frame, frame_width, frame_height
     
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -70,6 +72,7 @@ def mouse_callback(event, x, y, flags, param):
                 print(f"Point {len(points_clicked)}/4 ajouté.")
 
 def main():
+    """Main function to run the calibration tool. This function initializes the video capture from the provided source, sets up the display window and mouse callback for user interaction, and handles the main loop for displaying the video frame and processing user input. The user can click on the video frame to define the crosswalk polygon, and once 4 points are defined, they can save the configuration or reset it as needed."""
     global frame_display, original_frame, points_clicked, frame_width, frame_height
     
     if len(sys.argv) < 2:
