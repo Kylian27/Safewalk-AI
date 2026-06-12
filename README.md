@@ -101,19 +101,21 @@ VIDEO_DURATION_AFTER_SEC = 3.0    # Post-infraction footage duration recorded af
 ### 1. Clone Project Repository
 ```bash
 git clone https://github.com/Kylian27/Safewalk-AI
-cd SafeWalk-AI
+cd Safewalk-AI
 ```
 
 ### 2. Configure Virtual Environment Environment
 ```bash
 # Windows Environment Setup
-python -m venv venv
+python3 -m venv venv
 venv\Scripts\activate
 
 # Linux / MacOS Environment Setup
-python -m venv venv
+python3 -m venv venv
 source venv/bin/activate
 ```
+
+**Note:** Depending on your installation, you may need to use `python` instead of `python3`.
 
 ### 3. Install Dependencies
 ```bash
@@ -125,8 +127,10 @@ Ensure that your fine-tuned auto-calibration weights (`base_best.pt`) are proper
 
 ### 5. Run Application
 ```bash
-python main.py
+python3 main.py
 ```
+
+**Note:** Depending on your installation, you may need to use `python` instead of `python3`.
 
 ---
 
