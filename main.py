@@ -16,6 +16,7 @@ import config
 
 
 class MJPEGStreamReader:
+    """Reads MJPEG stream from a URL in a background thread, decodes JPEG frames, and provides the latest frame on demand."""
     def __init__(self, url: str):
         self.url = url
         self._lock = threading.Lock()
@@ -26,6 +27,7 @@ class MJPEGStreamReader:
         self._frame_count = 0
 
     def start(self) -> tuple[bool, object]:
+        """Starts the reader thread and waits for the first frame to be available."""
         self._running = True
         self._connected = False
         self._latest_frame = None
@@ -45,12 +47,14 @@ class MJPEGStreamReader:
         return True, first_frame_holder[0].copy()
 
     def get_frame(self) -> tuple[bool, object]:
+        """Retrieves the latest frame from the stream."""
         with self._lock:
             if self._latest_frame is None or not self._connected:
                 return False, None
             return True, self._latest_frame.copy()
 
     def stop(self):
+        """Stops the reader thread."""
         self._running = False
         self._connected = False
         if self._thread and self._thread.is_alive():
@@ -60,13 +64,16 @@ class MJPEGStreamReader:
 
     @property
     def is_connected(self) -> bool:
+        """Returns whether the reader is connected to the stream."""
         return self._connected
 
     @property
     def frame_count(self) -> int:
+        """Returns the number of frames received."""
         return self._frame_count
 
     def _reader_loop(self, first_frame_event, first_frame_holder):
+        """Continuously reads from the MJPEG stream, decodes JPEG frames, and updates the latest frame."""
         first_frame_sent = False
         while self._running:
             try:
@@ -104,6 +111,7 @@ class MJPEGStreamReader:
 
     def _stream_jpeg_scan(self, response, first_frame_event,
                           first_frame_holder, first_frame_sent):
+        """Scans the MJPEG stream for JPEG frames and decodes them."""
         JPEG_START = b"\xff\xd8"
         JPEG_END = b"\xff\xd9"
         CHUNK_SIZE = 8192
@@ -146,6 +154,7 @@ class MJPEGStreamReader:
                     print(f"[MJPEG] {self._frame_count} total frames received")
 
     def _decode_jpeg(self, data: bytes):
+        """Decodes JPEG bytes into an OpenCV image."""
         try:
             arr = np.frombuffer(data, dtype=np.uint8)
             return cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -154,6 +163,7 @@ class MJPEGStreamReader:
 
 
 class CaptureManager:
+    """Manages video capture from either an MJPEG stream or a video file, providing a unified interface for frame retrieval."""
     def __init__(self):
         self.source = None
         self.is_live = False
@@ -164,6 +174,7 @@ class CaptureManager:
         self._file_cap = None
 
     def open(self, source: str, is_live: bool) -> tuple[bool, object]:
+        """Opens the specified video source, which can be either a live MJPEG stream or a video file. Returns a tuple indicating success and the first frame (if successful)."""
         self.close()
         self.source = source
         self.is_live = is_live
@@ -173,6 +184,7 @@ class CaptureManager:
             return self._open_file(source)
 
     def get_frame(self) -> tuple[bool, object]:
+        """Retrieves the latest frame from the video source."""
         if self.is_live:
             if self._mjpeg_reader is None:
                 return False, None
@@ -183,6 +195,7 @@ class CaptureManager:
             return self._file_cap.read()
 
     def get_snapshot(self) -> tuple[bool, object]:
+        """Gets a snapshot frame without advancing the video file position (for file sources) or just the latest frame for live sources."""
         if self.is_live:
             if self._mjpeg_reader is None:
                 return False, None
@@ -197,15 +210,18 @@ class CaptureManager:
             return ret, frame
 
     def get_mjpeg_frame_count(self) -> int:
+        """Returns the number of frames received from the MJPEG stream. For file sources, this returns 0."""
         if self._mjpeg_reader is not None:
             return self._mjpeg_reader.frame_count
         return 0
 
     def reset_to_start(self):
+        """Resets the video file to the beginning. For live sources, this does nothing."""
         if not self.is_live and self._file_cap is not None:
             self._file_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
 
     def close(self):
+        """Closes any open video source and releases resources."""
         if self._mjpeg_reader is not None:
             self._mjpeg_reader.stop()
             self._mjpeg_reader = None
@@ -215,12 +231,14 @@ class CaptureManager:
 
     @property
     def is_open(self) -> bool:
+        """Returns whether a video source is currently open and connected."""
         if self.is_live:
             return self._mjpeg_reader is not None and self._mjpeg_reader.is_connected
         else:
             return self._file_cap is not None and self._file_cap.isOpened()
 
     def _open_live(self, source: str) -> tuple[bool, object]:
+        """Attempts to connect to the specified MJPEG stream URL and retrieves the first frame to determine resolution and confirm connectivity."""
         reader = MJPEGStreamReader(source)
         ret, frame = reader.start()
         if not ret or frame is None:
@@ -232,6 +250,7 @@ class CaptureManager:
         return True, frame
 
     def _open_file(self, source: str) -> tuple[bool, object]:
+        """Attempts to open the specified video file and retrieves the first frame to determine resolution, FPS, and confirm that the file is valid."""
         cap = cv2.VideoCapture(source)
         if not cap.isOpened():
             return False, None
@@ -250,6 +269,7 @@ class CaptureManager:
 
 
 class AutoCalibrator:
+    """Handles automatic calibration of the crosswalk polygon using a pre-trained model. Loads the model on demand and provides thread-safe access to calibration functionality."""
     def __init__(self):
         self.model = None
         self.predict_trimap = None
@@ -257,6 +277,7 @@ class AutoCalibrator:
         self.lock = threading.Lock()
 
     def load(self):
+        """Loads the auto-calibration model and utilities if they haven't been loaded already. This is done in a thread-safe manner to ensure that the model is only loaded once, even if multiple threads attempt to calibrate at the same time."""
         with self.lock:
             if self.model is not None:
                 return
@@ -280,6 +301,7 @@ class AutoCalibrator:
                 if root_utils: sys.modules['utils'] = root_utils
 
     def calibrate(self, frame):
+        """Performs auto-calibration on the given frame. Loads the model if it hasn't been loaded yet, then uses the model to predict a trimap and extract the crosswalk polygon from it. Returns the polygon as a list of percentage coordinates relative to the frame size, or None if calibration fails."""
         self.load()
         if self.model is None:
             return None
@@ -288,6 +310,7 @@ class AutoCalibrator:
 
 
 class LivePreviewThread(threading.Thread):
+    """Continuously captures frames from the video source and updates the preview display. Draws a polygon overlay if one is set, and shows FPS and connection status. This thread runs independently of the main processing thread to ensure that the UI remains responsive even if processing is intensive."""
     def __init__(self, capture_manager, display_queue, stop_event,
                  canvas_width, canvas_height):
         super().__init__(name="LivePreview", daemon=True)
@@ -301,10 +324,12 @@ class LivePreviewThread(threading.Thread):
         self._polygon_lock = threading.Lock()
 
     def set_polygon(self, polygon_percent: list):
+        """Sets the polygon to be drawn as an overlay on the preview. The polygon is defined as a list of (x_percent, y_percent) tuples, where the coordinates are relative to the frame size. This method is thread-safe and can be called from the main thread while the preview thread is running."""
         with self._polygon_lock:
             self.polygon_percent = list(polygon_percent)
 
     def run(self):
+        """Main loop for the live preview thread. Continuously captures frames from the video source, draws the polygon overlay if set, and updates the display queue with the latest frame. Also calculates and displays FPS and connection status. The loop runs until the stop event is set."""
         print("[Preview] Started")
         last_frame_count = -1
         fps_counter = FPSCounter()
@@ -357,6 +382,7 @@ class LivePreviewThread(threading.Thread):
         print("[Preview] Stopped")
 
     def _draw_overlay(self, frame, fps, is_live):
+        """Draws the FPS and connection status overlay on the given frame."""
         h, w = frame.shape[:2]
         source_text = "LIVE" if is_live else "FILE"
         color = (0, 200, 0) if is_live else (200, 200, 0)
@@ -372,7 +398,7 @@ class LivePreviewThread(threading.Thread):
 
 
 class FPSCounter:
-    """Tracks real-time FPS using a rolling window."""
+    """Simple utility class to calculate frames per second (FPS) over a sliding window of time. Each call to tick() records the current time and returns the average FPS based on the number of ticks and the elapsed time between the first and last tick in the window."""
     def __init__(self, window: int = 30):
         self._times = []
         self._window = window
@@ -388,6 +414,7 @@ class FPSCounter:
 
 
 class VideoProcessorThread(threading.Thread):
+    """Main processing thread that handles running the YOLO model on video frames, tracking vehicles and pedestrians, detecting violations, and preparing annotated frames for display. This thread runs independently of the live preview thread to ensure that the UI remains responsive even if processing is intensive. It also manages the state for moving camera mode, including auto-calibration and infraction recording."""
     # Max frames per second to send to YOLO.
     # Frames arriving faster than this are skipped for YOLO
     # but the latest frame is always shown.
@@ -414,6 +441,7 @@ class VideoProcessorThread(threading.Thread):
         self._yolo_fps_counter = FPSCounter()
 
     def run(self):
+        """Main loop for the video processing thread. Continuously captures frames from the video source, runs YOLO detection at a throttled rate, updates vehicle tracking and violation detection, and prepares annotated frames for display. Also manages the state for moving camera mode, including auto-calibration and infraction recording. The loop runs until the stop event is set or the video stream ends."""
         cm = self.capture_manager
         print(f"[Processor] Started — is_live={cm.is_live} "
               f"size={cm.frame_width}x{cm.frame_height} fps={cm.fps}")
@@ -627,6 +655,7 @@ class VideoProcessorThread(threading.Thread):
 
     def _handle_moving_camera(self, frame, frame_width, frame_height,
                                ego_state, polygon, calib_retry_counter):
+        """Handles the state transitions and logic for moving camera mode, including detecting when the camera is stopped, running auto-calibration, and updating the crosswalk polygon. This method is called on every frame when in moving camera mode and manages the ego state machine."""
         is_stopped, motion = self.motion_detector.update(frame)
 
         if is_stopped:
@@ -671,6 +700,7 @@ class VideoProcessorThread(threading.Thread):
         return ego_state, polygon, calib_retry_counter
 
     def _run_calibration_async(self, frame, frame_width, frame_height):
+        """Runs the auto-calibration process in a separate thread to avoid blocking the main video processing loop. The result of the calibration is stored in a thread-safe manner and will be applied in the main loop once it's ready."""
         with self._calib_lock:
             if self._calib_running:
                 return
@@ -678,6 +708,7 @@ class VideoProcessorThread(threading.Thread):
             self._calib_result = None
 
         def _do_calib():
+            """Performs the auto-calibration process and stores the result. This function runs in a separate thread to avoid blocking the main video processing loop."""
             poly = self.auto_calibrator.calibrate(frame)
             with self._calib_lock:
                 if poly is not None:
@@ -693,6 +724,7 @@ class VideoProcessorThread(threading.Thread):
         threading.Thread(target=_do_calib, daemon=True, name="AutoCalib").start()
 
     def _draw_fps(self, frame, display_fps, yolo_fps):
+        """Draws the FPS counters for both the display and YOLO processing on the given frame."""
         h, w = frame.shape[:2]
         cv2.putText(
             frame, f"Display: {display_fps:.1f} FPS",
@@ -706,6 +738,7 @@ class VideoProcessorThread(threading.Thread):
         return frame
 
     def _push_status_frame(self, frame, ego_state):
+        """Pushes a frame with the current ego state drawn on it to the display queue. This is used to immediately update the UI with the current status when transitioning between states in moving camera mode, such as when starting calibration."""
         status_frame = frame.copy()
         status_frame = utils.draw_status_panel(
             status_frame, 0, 0, False, self.violation_count,
@@ -722,6 +755,7 @@ class VideoProcessorThread(threading.Thread):
 
 
 class SmartCrosswalkApp:
+    """Main application class that sets up the UI, manages state, and coordinates between the video capture, live preview, and video processing threads. Handles user interactions for opening video sources, starting/stopping detection, calibration, and moving camera mode. Also manages the display queue for updating the UI with processed frames and handles stream disconnection events."""
     def __init__(self, window):
         self.window = window
         self.window.title("SafeWalk AI - Smart Crosswalk Monitor")
@@ -747,10 +781,12 @@ class SmartCrosswalkApp:
         self.check_stream_health()
 
     def save_settings(self):
+        """Persists the current crosswalk polygon settings to a JSON file. This allows the application to remember the calibration settings between sessions. The polygon is saved as a list of percentage coordinates relative to the frame size, which allows it to be resolution-independent when reloaded."""
         with open(self.settings_file, "w") as f:
             json.dump({"polygon": self.polygon_percent}, f)
 
     def setup_ui(self):
+        """Sets up the user interface using Tkinter. This includes the control panel on the left with buttons for opening video sources, starting/stopping detection, calibration options, and a canvas on the right for displaying the video feed with overlays. The control panel also includes labels for showing violation counts and stream health status, as well as a status label at the bottom for general messages."""
         self.controls = ttk.Frame(self.window, padding="10")
         self.controls.pack(side=tk.LEFT, fill=tk.Y)
 
@@ -825,6 +861,7 @@ class SmartCrosswalkApp:
         self.canvas_image = self.canvas.create_image(0, 0, anchor=tk.NW)
 
     def toggle_moving_camera_mode(self):
+        """Enables or disables moving camera mode based on the state of the checkbox. When moving camera mode is enabled, the manual and auto calibration buttons are disabled since calibration is handled automatically in this mode. When moving camera mode is disabled, the calibration buttons are re-enabled to allow manual calibration."""
         if self.moving_camera_var.get():
             self.btn_calib.config(state=tk.DISABLED)
             self.btn_auto_calib.config(state=tk.DISABLED)
@@ -833,6 +870,7 @@ class SmartCrosswalkApp:
             self.btn_auto_calib.config(state=tk.NORMAL)
 
     def _start_preview_thread(self):
+        """Starts the live preview thread that continuously captures frames from the video source and updates the preview display. If a preview thread is already running, it is stopped before starting a new one. The new preview thread is configured with the current capture manager, display queue, and polygon settings."""
         self._stop_preview_thread()
         self._preview_stop.clear()
         preview = LivePreviewThread(
@@ -847,6 +885,7 @@ class SmartCrosswalkApp:
         self._preview_thread.start()
 
     def _stop_preview_thread(self):
+        """Stops the live preview thread if it is running. Sets the stop event to signal the thread to exit, then waits for the thread to finish with a timeout. After stopping, the thread reference is cleared and the stop event is reset for future use."""
         self._preview_stop.set()
         if self._preview_thread and self._preview_thread.is_alive():
             self._preview_thread.join(timeout=2.0)
@@ -854,6 +893,7 @@ class SmartCrosswalkApp:
         self._preview_stop.clear()
 
     def _stop_processor_thread(self):
+        """Stops the video processing thread if it is running. Sets the stop event to signal the thread to exit, then waits for the thread to finish with a timeout. After stopping, the thread reference is cleared and the stop event is reset for future use."""
         self._processor_stop.set()
         if self._processor_thread and self._processor_thread.is_alive():
             self._processor_thread.join(timeout=2.0)
@@ -861,6 +901,7 @@ class SmartCrosswalkApp:
         self._processor_stop.clear()
 
     def _flush_display_queue(self):
+        """Empties the display queue to remove any pending frames that may be outdated. This is useful when stopping detection or when a stream disconnects, to ensure that old frames are not displayed after the state has changed."""
         while not self.display_queue.empty():
             try:
                 self.display_queue.get_nowait()
@@ -868,9 +909,11 @@ class SmartCrosswalkApp:
                 break
 
     def _on_stream_disconnect(self):
+        """Handles the event when the video stream is disconnected. This method is called from the video processing thread when it detects that the stream has been lost. It schedules a call to _handle_disconnect_on_main_thread on the main UI thread to safely update the UI and stop the processing thread."""
         self.window.after(0, self._handle_disconnect_on_main_thread)
 
     def _handle_disconnect_on_main_thread(self):
+        """Handles the stream disconnection event on the main UI thread. If the current mode is RUNNING, it stops the processor thread, flushes the display queue, updates the mode to IDLE, and shows a warning message to the user indicating that the stream was lost and they should check their phone and reconnect."""
         if self.mode == "RUNNING":
             self._stop_processor_thread()
             self._flush_display_queue()
@@ -885,6 +928,7 @@ class SmartCrosswalkApp:
             )
 
     def _on_violation_saved(self, session_id: str):
+        """Handles the event when a violation is saved. This method is called from the video processing thread when a new violation infraction is recorded. It appends the violation information to the violation log and updates the violation count label on the UI to reflect the total number of violations recorded."""
         self.violation_log.append({
             "session": session_id,
             "time": time.strftime("%H:%M:%S")
@@ -898,6 +942,7 @@ class SmartCrosswalkApp:
         )
 
     def check_stream_health(self):
+        """Periodically checks the health of the video stream and updates the stream health label on the UI. If the stream is live and open, it shows the current frame count. If the stream is live but not open, it shows a disconnected message. If there is no live stream, it clears the health label. This method reschedules itself to run every second to continuously monitor the stream status."""
         if self.capture_manager.is_live and self.capture_manager.is_open:
             reader = self.capture_manager._mjpeg_reader
             if reader:
@@ -914,6 +959,7 @@ class SmartCrosswalkApp:
         self.window.after(1000, self.check_stream_health)
 
     def open_recordings_folder(self):
+        """Opens the folder where infraction recordings are saved. This method is called when the user clicks the "View Recordings" button. It ensures that the folder exists and then opens it using the default file explorer on the user's operating system."""
         folder = os.path.abspath(config.INFRACTIONS_DIR)
         os.makedirs(folder, exist_ok=True)
         if sys.platform == "win32":
@@ -924,6 +970,7 @@ class SmartCrosswalkApp:
             os.system(f'xdg-open "{folder}"')
 
     def open_source(self):
+        """Handles the user action to open a video source. Prompts the user to choose between using a live stream from DroidCam or selecting a local video file. Depending on the choice, it either connects to the DroidCam stream using the provided IP address or opens the selected video file. After successfully opening the source, it starts the live preview thread and updates the status label accordingly. If there are any errors during connection or file opening, it shows an error message to the user."""
         from tkinter import simpledialog
 
         choice = messagebox.askyesnocancel(
@@ -1008,6 +1055,7 @@ class SmartCrosswalkApp:
                 messagebox.showerror("Error", "Could not read the video file.")
 
     def get_auto_polygon(self, frame):
+        """Runs the auto-calibration process on the given frame to detect the crosswalk polygon. This method temporarily modifies the Python path to import the auto-calibration utilities without causing conflicts with the main application's modules. It loads the pre-trained model, predicts the trimap for the input frame, and extracts the polygon coordinates. The resulting polygon is returned as a list of points, or None if no valid polygon is detected."""
         auto_calib_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), 'auto_calibrate')
         )
@@ -1028,6 +1076,7 @@ class SmartCrosswalkApp:
             if root_utils: sys.modules['utils'] = root_utils
 
     def start_auto_calibration(self):
+        """Initiates the AI auto-calibration process to automatically detect the crosswalk polygon from the current video frame. This method checks if a video source is loaded, then captures a snapshot frame and runs the auto-calibration algorithm. If a valid polygon is detected, it updates the polygon settings and applies them to the preview and processing threads. The user is notified of the success or failure of the auto-calibration process through status messages and dialog boxes."""
         if not self.capture_manager.is_open:
             messagebox.showwarning("Warning", "Please load a video first.")
             return
@@ -1065,6 +1114,7 @@ class SmartCrosswalkApp:
             messagebox.showerror("Error", f"Auto-calibration error:\n{str(e)}")
 
     def start_calibration(self):
+        """Starts the manual calibration process, allowing the user to click on the video preview to define the crosswalk zone. This method checks if a video source is loaded, then switches the application mode to CALIBRATING and prompts the user to click 4 points on the canvas to define the polygon. The clicked points are collected and displayed on the canvas, and once 4 points are defined, they are converted to percentage coordinates, saved to settings, and applied to the preview and processing threads. The user is notified of the calibration status through status messages and dialog boxes."""
         if not self.capture_manager.is_open:
             messagebox.showwarning("Warning", "Please load a video first.")
             return
@@ -1076,6 +1126,7 @@ class SmartCrosswalkApp:
         )
 
     def on_canvas_click(self, event):
+        """Handles mouse click events on the canvas during calibration mode. When the user clicks on the canvas, this method records the click coordinates as points for defining the crosswalk polygon. It visually marks the clicked points and draws a temporary polygon as the user clicks. Once 4 points are defined, it converts them to percentage coordinates, saves the settings, updates the preview and processing threads with the new polygon, and switches back to PREVIEW mode."""
         if self.mode != "CALIBRATING":
             return
 
@@ -1111,6 +1162,7 @@ class SmartCrosswalkApp:
             )
 
     def start_detection(self):
+        """Starts the video processing thread to perform pedestrian and vehicle detection, as well as violation monitoring. This method checks if a video source is loaded and if calibration is done (if not in moving camera mode) before starting. It loads the AI model if not already loaded, resets the capture to the start, clears any previous violations, and starts the VideoProcessorThread with the current settings. The application mode is set to RUNNING and the status label is updated to indicate that detection is in progress."""
         if not self.capture_manager.is_open:
             messagebox.showwarning("Warning", "Please load a video first.")
             return
@@ -1157,6 +1209,7 @@ class SmartCrosswalkApp:
         self.status_label.config(text="Status: Detection in progress")
 
     def stop_detection(self):
+        """Stops the video processing thread if it is currently running. This method checks if the application mode is RUNNING before attempting to stop the processor thread. It signals the processor thread to stop, waits for it to finish, flushes the display queue to clear any pending frames, and then checks if the video source is still open. If the source is open, it restarts the live preview thread and updates the mode to PREVIEW with an appropriate status message. If the source is not open, it sets the mode to IDLE and updates the status to indicate that detection has stopped."""
         if self.mode != "RUNNING":
             return
         self._stop_processor_thread()
@@ -1172,6 +1225,7 @@ class SmartCrosswalkApp:
             self.status_label.config(text="Status: Stopped")
 
     def process_queue(self):
+        """Continuously processes the display queue to update the video feed on the canvas. This method is scheduled to run every 10 milliseconds using the Tkinter after method. If the application mode is PREVIEW, CALIBRATING, or RUNNING, it attempts to get a frame from the display queue without blocking. If a frame is available, it converts it to a PhotoImage and updates the canvas image. If the queue is empty, it simply passes and waits for the next scheduled call."""
         if self.mode in ("PREVIEW", "CALIBRATING", "RUNNING"):
             try:
                 img = self.display_queue.get_nowait()
@@ -1182,6 +1236,7 @@ class SmartCrosswalkApp:
         self.window.after(10, self.process_queue)
 
     def stop_all(self):
+        """Stops all running threads and closes the video capture. This method is called when the application is closing to ensure that all resources are properly released. It signals both the processor and preview threads to stop, waits for them to finish, closes the capture manager, and updates the application mode and status label accordingly."""
         self._stop_processor_thread()
         self._stop_preview_thread()
         self.capture_manager.close()
@@ -1189,6 +1244,7 @@ class SmartCrosswalkApp:
         self.status_label.config(text="Status: Stopped")
 
     def on_closing(self):
+        """Handles the application closing event. This method is called when the user attempts to close the application window. It first calls stop_all to ensure that all threads are stopped and resources are released, then it destroys the main window to exit the application."""
         self.stop_all()
         self.window.destroy()
 
