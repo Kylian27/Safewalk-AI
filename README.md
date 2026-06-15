@@ -28,6 +28,50 @@ SafeWalk AI is an advanced, multi-threaded computer vision system designed to op
 * **Mathematical Operations:** NumPy for multi-dimensional matrix operations, coordinate rounding, and mask indexing.
 
 ---
+ 
+## 🧠 Auto-Calibration Model — CrosswalkTrimapNet
+ 
+A custom trimap segmentation model built on **EfficientNet-B4** for vehicle-mounted crosswalk detection.
+ 
+Rather than a binary mask, the model outputs a **3-class trimap** (background / interior / boundary), enabling more precise polygon fitting. Interior and boundary are merged at inference time (`trimap >= 1`) to form the final calibration region.
+ 
+### Architecture
+ 
+| Component | Role |
+|---|---|
+| EfficientNet-B4 backbone | Multi-scale feature extraction (ImageNet pretrained) |
+| GatedLaplacianUnit + LaplacianFusion | Edge sharpening on skip connections and final output |
+| CBAM + BoundaryAttentionModule | Region focus and boundary pixel weighting |
+| 5-stage ConvTranspose2d decoder | Resolution recovery with skip concatenation |
+ 
+### Training Data
+ 
+None of the datasets included pre-built trimaps. Trimaps were generated from polygon annotations via erosion/dilation across all three datasets.
+ 
+**Stage 1 — Base Training (5,355 images)**
+ 
+| Dataset | Source | Selection | Final |
+|---|---|---|---|
+| Mapillary Vistas v2 | [HuggingFace](https://huggingface.co/datasets/candylion/mapillary-vistas-v2) | Extract crosswalk class → remove images where crosswalk < 5% of frame | 2,055 |
+| FPVCrosswalk2025 | [Mendeley DOI: 10.17632/mcr2jwk5bp.1](https://data.mendeley.com/datasets/mcr2jwk5bp/1) | Used as-is | 3,300 |
+ 
+**Stage 2 — Fine-Tuning (18,227 images)**
+ 
+| Dataset | Source | Selection | Final |
+|---|---|---|---|
+| AIHub Metropolitan Dashcam | [AIHub datasetkey 197](https://aihub.or.kr/aihubdata/data/view.do?dataSetSn=197) | Extract crosswalk class (87,086) → daytime only (60,197) → remove images where crosswalk < 3% of frame | 18,227 |
+ 
+### Results
+ 
+| Metric | Score |
+|---|---|
+| mIoU | 0.7929 |
+| Interior Recall | 0.9563 |
+| **CW-FG IoU** | **0.9357** |
+ 
+> CW-FG IoU measures detection accuracy on the merged interior + boundary region — the metric most relevant to calibration quality.
+ 
+---
 
 ## 🖥️ Graphical User Interface & Button Control Guide
 
