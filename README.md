@@ -1,8 +1,57 @@
 # SafeWalk AI - Intelligent Crosswalk Monitoring System
 
+[![SafeWalk AI Video Presentation](https://img.shields.io/badge/YouTube-Video%20Presentation-red?style=for-the-badge&logo=youtube)](https://youtu.be/iGKjVSqxaao)
+
 SafeWalk AI is an advanced, multi-threaded computer vision system designed to optimize urban road safety by automatically monitoring pedestrian crosswalks. Utilizing state-of-the-art deep learning architectures, the system detects pedestrians and vehicles in real-time, tracks individual entities across frames to eliminate double-counting, and flags traffic violations when a vehicle fails to yield the right-of-way to a pedestrian inside the designated zone.
 
 ---
+
+## 🗺️ Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Sources["📥 Input"]
+        PHONE["📱 DroidCam\niPhone via Wi-Fi"]
+        FILE["🎬 MP4 File"]
+    end
+
+    subgraph Core["⚙️ Core Pipeline"]
+        MJPEG["MJPEGStreamReader\nRaw JPEG byte parsing"]
+        CAPTURE["CaptureManager\nUnified frame access"]
+        
+        PREVIEW["👁️ LivePreviewThread\nLive feed + zone overlay"]
+        PROCESSOR["🧠 VideoProcessorThread\nYOLO + Tracking + Drawing"]
+    end
+
+    subgraph AI["🤖 AI Models"]
+        YOLO["YOLOv8n\nPerson & Vehicle detection"]
+        CALIB["CrosswalkTrimapNet\nEfficientNet-B4\nAuto zone detection"]
+    end
+
+    subgraph Output["📤 Output"]
+        CANVAS["🖥️ Live Display\n960×540 canvas"]
+        RECORD["💾 Infraction clips\n/infractions folder"]
+    end
+
+    PHONE -->|"MJPEG stream\nHTTP :4747"| MJPEG
+    FILE -->|"cv2.VideoCapture"| CAPTURE
+    MJPEG --> CAPTURE
+
+    CAPTURE -->|"No detection"| PREVIEW
+    CAPTURE -->|"Detection active"| PROCESSOR
+
+    PROCESSOR <-->|"Zone detection"| CALIB
+    PROCESSOR -->|"Detections"| YOLO
+
+    PREVIEW --> CANVAS
+    PROCESSOR --> CANVAS
+    PROCESSOR -->|"Violation triggered"| RECORD
+
+    style Sources fill:#1e3a5f,color:#fff,stroke:#2980b9
+    style Core fill:#1a472a,color:#fff,stroke:#27ae60
+    style AI fill:#4a235a,color:#fff,stroke:#8e44ad
+    style Output fill:#7e2811,color:#fff,stroke:#e74c3c
+```
 
 ## ✨ Comprehensive Key Features
 
